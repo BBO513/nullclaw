@@ -14,8 +14,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_iter = try std.process.argsWithAllocator(allocator);
+    defer args_iter.deinit();
+
+    // Collect args into a slice
+    var args_list = std.ArrayList([]const u8).init(allocator);
+    defer args_list.deinit();
+    while (args_iter.next()) |arg| {
+        try args_list.append(arg);
+    }
+    const args = args_list.items;
 
     if (args.len < 2) {
         try printUsage();
