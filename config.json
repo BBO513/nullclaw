@@ -1,0 +1,29 @@
+{
+    "websocket_host": "127.0.0.1",
+    "websocket_port": 3000,
+    "http_host": "127.0.0.1",
+    "http_port": 3000,
+    "secret_store_path": "/var/lib/nullclaw/secrets.enc",
+    "sandbox_enabled": true,
+    "max_memory_bytes": 1048576,
+    "channels": [
+        { "name": "whatsapp", "enabled": true, "endpoint": "https://api.twilio.com/2010-04-01", "auth_token_key": "WHATSAPP_TOKEN" },
+        { "name": "twilio_sms", "enabled": true, "endpoint": "https://api.twilio.com/2010-04-01", "auth_token_key": "TWILIO_TOKEN" },
+        { "name": "websocket", "enabled": true, "endpoint": "ws://127.0.0.1:3000/ws" },
+        { "name": "email", "enabled": true, "endpoint": "smtp://localhost:587" },
+        { "name": "telegram", "enabled": true, "endpoint": "https://api.telegram.org", "auth_token_key": "TELEGRAM_TOKEN" },
+        { "name": "slack", "enabled": true, "endpoint": "https://slack.com/api", "auth_token_key": "SLACK_TOKEN" },
+        { "name": "discord", "enabled": true, "endpoint": "https://discord.com/api/v10", "auth_token_key": "DISCORD_TOKEN" },
+        { "name": "signal", "enabled": true, "endpoint": "https://textsecure-service.whispersystems.org" },
+        { "name": "messenger", "enabled": true, "endpoint": "https://graph.facebook.com/v18.0", "auth_token_key": "MESSENGER_TOKEN" },
+        { "name": "line", "enabled": true, "endpoint": "https://api.line.me/v2", "auth_token_key": "LINE_TOKEN" },
+        { "name": "wechat", "enabled": true, "endpoint": "https://api.weixin.qq.com", "auth_token_key": "WECHAT_TOKEN" },
+        { "name": "viber", "enabled": true, "endpoint": "https://chatapi.viber.com/pa", "auth_token_key": "VIBER_TOKEN" },
+        { "name": "teams", "enabled": true, "endpoint": "https://graph.microsoft.com/v1.0", "auth_token_key": "TEAMS_TOKEN" },
+        { "name": "irc", "enabled": true, "endpoint": "irc://irc.libera.chat:6697" },
+        { "name": "matrix", "enabled": true, "endpoint": "https://matrix.org/_matrix/client/r0" },
+        { "name": "xmpp", "enabled": true, "endpoint": "xmpp://jabber.org:5222" },
+        { "name": "rcs", "enabled": true, "endpoint": "https://jibe.google.com/rcs" },
+        { "name": "push_notification", "enabled": true, "endpoint": "https://fcm.googleapis.com/v1", "auth_token_key": "FCM_TOKEN" }
+    ]
+}

@@ -1,0 +1,49 @@
+[Unit]
+Description=NullClaw Nexus AI Agent Gateway
+Documentation=https://github.com/nullclaw/nexus
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nullclaw serve --config /etc/nullclaw/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+# Resource limits (1 MB peak memory envelope)
+MemoryMax=1M
+MemoryHigh=768K
+CPUQuota=50%
+
+# File access
+ReadWritePaths=/var/lib/nullclaw
+ReadOnlyPaths=/etc/nullclaw
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nullclaw
+
+# User isolation
+User=nullclaw
+Group=nullclaw
+
+[Install]
+WantedBy=multi-user.target

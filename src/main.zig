@@ -1,46 +1,145 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
+const std = @import("std");
+const Config = @import("config.zig").Config;
+const EventBus = @import("event_bus.zig").EventBus;
+const ChannelRegistry = @import("channels.zig").ChannelRegistry;
+const SecretStore = @import("secret_store.zig").SecretStore;
+const Sandbox = @import("sandbox.zig").Sandbox;
+const Gateway = @import("gateway.zig").Gateway;
+const Doctor = @import("doctor.zig").Doctor;
+
+const version = "0.1.0";
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+    if (args.len < 2) {
+        try printUsage();
+        return;
+    }
 
-    try bw.flush(); // Don't forget to flush!
+    const command = args[1];
+
+    if (std.mem.eql(u8, command, "serve")) {
+        try runServe(allocator, args);
+    } else if (std.mem.eql(u8, command, "doctor")) {
+        try runDoctor(allocator, args);
+    } else if (std.mem.eql(u8, command, "version")) {
+        const stdout = std.io.getStdOut().writer();
+        try stdout.print("nullclaw {s}\n", .{version});
+    } else if (std.mem.eql(u8, command, "help")) {
+        try printUsage();
+    } else {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Unknown command: {s}\n\n", .{command});
+        try printUsage();
+    }
 }
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+fn printUsage() !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll(
+        \\NullClaw Nexus - Hyper-Optimized AI Agent Gateway
+        \\
+        \\Usage: nullclaw <command> [options]
+        \\
+        \\Commands:
+        \\  serve     Start the NullClaw gateway server
+        \\  doctor    Run system diagnostics and connectivity checks
+        \\  version   Print version information
+        \\  help      Show this help message
+        \\
+        \\Options:
+        \\  --config <path>   Path to config.json (default: ./config.json)
+        \\
+        \\Examples:
+        \\  nullclaw serve
+        \\  nullclaw serve --config /etc/nullclaw/config.json
+        \\  nullclaw doctor
+        \\
+    );
 }
 
-test "use other module" {
-    try std.testing.expectEqual(@as(i32, 150), lib.add(100, 50));
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
+fn parseConfigPath(args: []const []const u8) []const u8 {
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--config") and i + 1 < args.len) {
+            return args[i + 1];
         }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    }
+    return "config.json";
 }
 
-const std = @import("std");
+fn runServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const config_path = parseConfigPath(args);
+    const config = try Config.loadFromFile(allocator, config_path);
 
-/// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
-const lib = @import("nullclaw_lib");
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("Loading config from: {s}\n", .{config_path});
+
+    // Initialize event bus
+    var event_bus = EventBus.init(allocator);
+    defer event_bus.deinit();
+
+    // Initialize channel registry
+    var registry = ChannelRegistry.init(allocator);
+    defer registry.deinit();
+
+    for (config.channels) |ch_cfg| {
+        try registry.registerGeneric(
+            ch_cfg.name,
+            ch_cfg.endpoint,
+            ch_cfg.auth_token_key,
+            ch_cfg.enabled,
+            &event_bus,
+        );
+    }
+
+    // Connect all channels
+    try registry.connectAll();
+    try stdout.print("Registered {d} communication channels\n", .{config.channels.len});
+
+    // Initialize secret store
+    var secret_store = SecretStore.init(allocator, config.secret_store_path, "nullclaw-master");
+    defer secret_store.deinit();
+    secret_store.load() catch {
+        try stdout.writeAll("No existing secret store found, starting fresh\n");
+    };
+
+    // Initialize sandbox
+    var sandbox = Sandbox.init(allocator, config.sandbox_enabled);
+    defer sandbox.deinit();
+    try sandbox.allowRead("/usr");
+    try sandbox.allowRead("/etc");
+    try sandbox.allowRead("/tmp");
+    try sandbox.allowWrite("/tmp");
+
+    const sandbox_status = sandbox.status();
+    if (sandbox_status.landlock_available) {
+        try stdout.writeAll("Landlock sandbox: available\n");
+    } else {
+        try stdout.writeAll("Landlock sandbox: not available (running without sandbox)\n");
+    }
+
+    // Start the gateway
+    var gateway = Gateway.init(allocator, config, &event_bus);
+    defer gateway.deinit();
+
+    try gateway.start();
+}
+
+fn runDoctor(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const config_path = parseConfigPath(args);
+    const config = try Config.loadFromFile(allocator, config_path);
+
+    var doctor = Doctor.init(allocator, config);
+    const all_passed = try doctor.run();
+
+    if (!all_passed) {
+        std.process.exit(1);
+    }
+}
