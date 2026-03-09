@@ -587,9 +587,8 @@ pub const Gateway = struct {
             if (root.object.get("model")) |v| {
                 if (v == .string) self.active_provider.model = self.allocator.dupe(u8, v.string) catch self.active_provider.model;
             }
+            std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
-
-        std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
 
         try request.respond(
             \\{"status":"ok","message":"Provider configuration updated"}
