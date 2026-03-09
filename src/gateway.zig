@@ -230,7 +230,36 @@ pub const Gateway = struct {
             break :blk self.active_provider;
         };
 
-        std.log.info("Forwarding to {s} at {s}", .{ provider.provider, provider.base_url });
+        // Check if streaming is requested
+        const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
+            std.mem.indexOf(u8, body, "\"stream\": true") != null;
+
+        std.log.info("Forwarding to {s} at {s} (stream={s})", .{
+            provider.provider,
+            provider.base_url,
+            if (is_stream) "true" else "false",
+        });
+
+        if (is_stream) {
+            self.handleStreamingForward(request, provider, body) catch {
+                // If streaming setup fails, try to send error as normal response
+                const timestamp = std.time.timestamp();
+                var err_buf: [2048]u8 = undefined;
+                const err_response = std.fmt.bufPrint(&err_buf,
+                    \\{{"id":"chatcmpl-err-{d}","object":"chat.completion","created":{d},"model":"{s}","choices":[{{"index":0,"message":{{"role":"assistant","content":"Error: Could not connect to {s} provider at {s}. Please check your settings."}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}}}
+                , .{ timestamp, timestamp, provider.model, provider.provider, provider.base_url }) catch
+                    \\{"error":"provider_error","message":"Failed to forward request"}
+                ;
+                request.respond(err_response, .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                }) catch {};
+            };
+            return;
+        }
 
         const response_body = self.forwardToProvider(provider, body) catch {
             const timestamp = std.time.timestamp();
@@ -260,6 +289,259 @@ pub const Gateway = struct {
                 .{ .name = "access-control-allow-origin", .value = "*" },
             },
         });
+    }
+
+    /// Handle streaming SSE response — proxy chunks from provider to client
+    fn handleStreamingForward(self: *Gateway, request: *std.http.Server.Request, provider: ProviderConfig, body: []const u8) !void {
+        const is_anthropic = std.mem.eql(u8, provider.provider, "anthropic");
+
+        // Build target URL
+        var url_buf: [2048]u8 = undefined;
+        const target_url = if (is_anthropic)
+            std.fmt.bufPrint(&url_buf, "{s}/v1/messages", .{provider.base_url}) catch return error.Overflow
+        else
+            std.fmt.bufPrint(&url_buf, "{s}/v1/chat/completions", .{provider.base_url}) catch return error.Overflow;
+
+        const uri = std.Uri.parse(target_url) catch return error.InvalidUri;
+
+        // Build auth header
+        var auth_buf: [1024]u8 = undefined;
+        var auth_value: ?[]const u8 = null;
+        if (provider.api_key.len > 0 and !is_anthropic) {
+            auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{provider.api_key}) catch return error.Overflow;
+        }
+
+        // For Anthropic, we need to transform the request and add stream:true
+        var request_body: []const u8 = body;
+        var transformed_body: ?[]u8 = null;
+        defer if (transformed_body) |b| self.allocator.free(b);
+
+        if (is_anthropic) {
+            // Transform to Anthropic format with stream:true
+            const base = self.transformToAnthropicRequest(body) catch null;
+            if (base) |b| {
+                // Inject "stream":true before the closing brace
+                var stream_body = std.ArrayList(u8).init(self.allocator);
+                defer stream_body.deinit();
+                if (b.len > 1) {
+                    stream_body.appendSlice(b[0 .. b.len - 1]) catch {};
+                    stream_body.appendSlice(",\"stream\":true}") catch {};
+                    self.allocator.free(b);
+                    transformed_body = stream_body.toOwnedSlice() catch null;
+                    if (transformed_body) |tb| request_body = tb;
+                } else {
+                    self.allocator.free(b);
+                }
+            }
+        }
+
+        // Open HTTP client to provider
+        var client: std.http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        var server_header_buf: [16384]u8 = undefined;
+
+        var upstream_req = blk: {
+            if (is_anthropic and provider.api_key.len > 0) {
+                break :blk client.open(.POST, uri, .{
+                    .server_header_buffer = &server_header_buf,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "x-api-key", .value = provider.api_key },
+                        .{ .name = "anthropic-version", .value = "2023-06-01" },
+                    },
+                }) catch return error.ConnectionFailed;
+            } else if (auth_value) |av| {
+                break :blk client.open(.POST, uri, .{
+                    .server_header_buffer = &server_header_buf,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "authorization", .value = av },
+                    },
+                }) catch return error.ConnectionFailed;
+            } else {
+                break :blk client.open(.POST, uri, .{
+                    .server_header_buffer = &server_header_buf,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                    },
+                }) catch return error.ConnectionFailed;
+            }
+        };
+        defer upstream_req.deinit();
+
+        upstream_req.transfer_encoding = .{ .content_length = request_body.len };
+        upstream_req.send() catch return error.SendFailed;
+        upstream_req.writer().writeAll(request_body) catch return error.WriteFailed;
+        upstream_req.finish() catch return error.SendFailed;
+        upstream_req.wait() catch return error.WaitFailed;
+
+        if (upstream_req.response.status != .ok and upstream_req.response.status != .created) {
+            std.log.err("Provider returned status: {d}", .{@intFromEnum(upstream_req.response.status)});
+            return error.ProviderError;
+        }
+
+        // Start streaming response to client using chunked transfer encoding
+        var send_buffer: [8192]u8 = undefined;
+        var response = request.respondStreaming(.{
+            .send_buffer = &send_buffer,
+            .respond_options = .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "text/event-stream" },
+                    .{ .name = "cache-control", .value = "no-cache" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            },
+        });
+
+        // Read chunks from provider and relay to client
+        var chunk_buf: [4096]u8 = undefined;
+        const upstream_reader = upstream_req.reader();
+
+        if (is_anthropic) {
+            // Anthropic SSE → OpenAI SSE transform: read line by line and convert
+            var line_buf: [8192]u8 = undefined;
+            while (true) {
+                const line = upstream_reader.readUntilDelimiter(&line_buf, '\n') catch |err| {
+                    switch (err) {
+                        error.EndOfStream => break,
+                        else => break,
+                    }
+                };
+
+                if (line.len == 0) {
+                    // Empty line — SSE event separator, relay it
+                    response.writeAll("\n") catch break;
+                    response.flush() catch break;
+                    continue;
+                }
+
+                if (std.mem.startsWith(u8, line, "data: ")) {
+                    const data = line[6..];
+
+                    // Handle Anthropic SSE events and transform to OpenAI format
+                    if (std.mem.eql(u8, data, "[DONE]")) {
+                        response.writeAll("data: [DONE]\n\n") catch break;
+                        response.flush() catch break;
+                        break;
+                    }
+
+                    // Try to parse Anthropic SSE chunk and transform
+                    const transformed = self.transformAnthropicStreamChunk(data) catch {
+                        // If transform fails, relay raw
+                        response.writeAll("data: ") catch break;
+                        response.writeAll(data) catch break;
+                        response.writeAll("\n\n") catch break;
+                        response.flush() catch break;
+                        continue;
+                    };
+
+                    if (transformed) |t| {
+                        defer self.allocator.free(t);
+                        response.writeAll("data: ") catch break;
+                        response.writeAll(t) catch break;
+                        response.writeAll("\n\n") catch break;
+                        response.flush() catch break;
+                    }
+                } else if (std.mem.startsWith(u8, line, "event: ")) {
+                    const event_type = line[7..];
+                    // Anthropic sends event: message_stop when done
+                    if (std.mem.eql(u8, event_type, "message_stop")) {
+                        response.writeAll("data: [DONE]\n\n") catch break;
+                        response.flush() catch break;
+                    }
+                    // Skip other event type lines (event: content_block_delta, etc.)
+                }
+            }
+        } else {
+            // OpenAI-compatible provider: relay SSE chunks directly
+            while (true) {
+                const bytes_read = upstream_reader.read(&chunk_buf) catch break;
+                if (bytes_read == 0) break;
+
+                response.writeAll(chunk_buf[0..bytes_read]) catch break;
+                response.flush() catch break;
+            }
+        }
+
+        response.end() catch {};
+    }
+
+    /// Transform a single Anthropic SSE data chunk to OpenAI streaming format
+    fn transformAnthropicStreamChunk(self: *Gateway, data: []const u8) !?[]u8 {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, data, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .object) return null;
+
+        const event_type = blk: {
+            if (root.object.get("type")) |v| if (v == .string) break :blk v.string;
+            break :blk "";
+        };
+
+        // content_block_delta contains the actual text tokens
+        if (std.mem.eql(u8, event_type, "content_block_delta")) {
+            const delta = root.object.get("delta") orelse return null;
+            if (delta != .object) return null;
+            const text = blk: {
+                if (delta.object.get("text")) |v| if (v == .string) break :blk v.string;
+                break :blk "";
+            };
+
+            if (text.len == 0) return null;
+
+            // Build OpenAI streaming chunk format
+            var output = std.ArrayList(u8).init(self.allocator);
+            errdefer output.deinit();
+
+            const timestamp = std.time.timestamp();
+            var ts_buf: [20]u8 = undefined;
+            const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{timestamp}) catch "0";
+
+            try output.appendSlice("{\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":");
+            try output.appendSlice(ts_str);
+            try output.appendSlice(",\"model\":\"claude\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"");
+            try appendJsonEscaped(&output, text);
+            try output.appendSlice("\"},\"finish_reason\":null}]}");
+
+            return try output.toOwnedSlice();
+        }
+
+        // message_start — send initial chunk with role
+        if (std.mem.eql(u8, event_type, "message_start")) {
+            var output = std.ArrayList(u8).init(self.allocator);
+            errdefer output.deinit();
+
+            const timestamp = std.time.timestamp();
+            var ts_buf: [20]u8 = undefined;
+            const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{timestamp}) catch "0";
+
+            try output.appendSlice("{\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":");
+            try output.appendSlice(ts_str);
+            try output.appendSlice(",\"model\":\"claude\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}");
+
+            return try output.toOwnedSlice();
+        }
+
+        // message_delta with stop_reason — send finish chunk
+        if (std.mem.eql(u8, event_type, "message_delta")) {
+            var output = std.ArrayList(u8).init(self.allocator);
+            errdefer output.deinit();
+
+            const timestamp = std.time.timestamp();
+            var ts_buf: [20]u8 = undefined;
+            const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{timestamp}) catch "0";
+
+            try output.appendSlice("{\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":");
+            try output.appendSlice(ts_str);
+            try output.appendSlice(",\"model\":\"claude\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}");
+
+            return try output.toOwnedSlice();
+        }
+
+        return null;
     }
 
     /// Forward request to configured LLM provider via HTTP client
