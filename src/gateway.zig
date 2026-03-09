@@ -31,19 +31,33 @@ pub const Gateway = struct {
     start_time: i64,
 
     pub fn init(allocator: std.mem.Allocator, config: Config, event_bus: *EventBus) Gateway {
+        // Dupe all provider strings so active_provider always owns its memory
+        // and can be safely freed on update or deinit.
+        const owned_provider = ProviderConfig{
+            .provider = allocator.dupe(u8, config.provider.provider) catch config.provider.provider,
+            .base_url = allocator.dupe(u8, config.provider.base_url) catch config.provider.base_url,
+            .api_key = allocator.dupe(u8, config.provider.api_key) catch config.provider.api_key,
+            .model = allocator.dupe(u8, config.provider.model) catch config.provider.model,
+        };
         return .{
             .allocator = allocator,
             .config = config,
             .event_bus = event_bus,
             .server = null,
             .running = false,
-            .active_provider = config.provider,
+            .active_provider = owned_provider,
             .provider_mutex = .{},
             .start_time = std.time.timestamp(),
         };
     }
 
     pub fn deinit(self: *Gateway) void {
+        // Free heap-owned provider strings
+        self.allocator.free(self.active_provider.provider);
+        self.allocator.free(self.active_provider.base_url);
+        self.allocator.free(self.active_provider.api_key);
+        self.allocator.free(self.active_provider.model);
+
         if (self.server) |*s| {
             s.deinit();
         }
@@ -858,16 +872,44 @@ pub const Gateway = struct {
             defer self.provider_mutex.unlock();
 
             if (root.object.get("type")) |v| {
-                if (v == .string) self.active_provider.provider = self.allocator.dupe(u8, v.string) catch self.active_provider.provider;
+                if (v == .string) {
+                    const old = self.active_provider.provider;
+                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.provider;
+                    if (new_val.ptr != old.ptr) {
+                        self.active_provider.provider = new_val;
+                        self.allocator.free(old);
+                    }
+                }
             }
             if (root.object.get("base_url")) |v| {
-                if (v == .string) self.active_provider.base_url = self.allocator.dupe(u8, v.string) catch self.active_provider.base_url;
+                if (v == .string) {
+                    const old = self.active_provider.base_url;
+                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.base_url;
+                    if (new_val.ptr != old.ptr) {
+                        self.active_provider.base_url = new_val;
+                        self.allocator.free(old);
+                    }
+                }
             }
             if (root.object.get("api_key")) |v| {
-                if (v == .string) self.active_provider.api_key = self.allocator.dupe(u8, v.string) catch self.active_provider.api_key;
+                if (v == .string) {
+                    const old = self.active_provider.api_key;
+                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.api_key;
+                    if (new_val.ptr != old.ptr) {
+                        self.active_provider.api_key = new_val;
+                        self.allocator.free(old);
+                    }
+                }
             }
             if (root.object.get("model")) |v| {
-                if (v == .string) self.active_provider.model = self.allocator.dupe(u8, v.string) catch self.active_provider.model;
+                if (v == .string) {
+                    const old = self.active_provider.model;
+                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.model;
+                    if (new_val.ptr != old.ptr) {
+                        self.active_provider.model = new_val;
+                        self.allocator.free(old);
+                    }
+                }
             }
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
