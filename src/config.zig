@@ -30,6 +30,9 @@ pub const Config = struct {
     channels: []const ChannelConfig = &default_channels,
     /// LLM provider routing configuration
     provider: ProviderConfig = .{},
+    /// Master key for authenticating admin endpoints (e.g. /config/provider POST)
+    /// If empty, falls back to NULLCLAW_MASTER_KEY env var. If both empty, admin endpoints are unprotected.
+    master_key: []const u8 = "",
 
     pub const default_channels: [18]ChannelConfig = .{
         .{ .name = "whatsapp", .enabled = true, .endpoint = "https://api.twilio.com/2010-04-01", .auth_token_key = "WHATSAPP_TOKEN" },
@@ -99,6 +102,11 @@ pub const Config = struct {
         }
         if (root.object.get("max_memory_bytes")) |v| {
             if (v == .integer) config.max_memory_bytes = @intCast(v.integer);
+        }
+
+        // Master key
+        if (root.object.get("master_key")) |v| {
+            if (v == .string) config.master_key = try allocator.dupe(u8, v.string);
         }
 
         // Provider config

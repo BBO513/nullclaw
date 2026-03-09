@@ -791,7 +791,59 @@ pub const Gateway = struct {
         });
     }
 
+    /// Resolve the master key: config value takes precedence, falls back to NULLCLAW_MASTER_KEY env var.
+    /// Returns null if no master key is configured (admin endpoints are unprotected).
+    fn getMasterKey(self: *Gateway) ?[]const u8 {
+        if (self.config.master_key.len > 0) return self.config.master_key;
+        return std.posix.getenv("NULLCLAW_MASTER_KEY");
+    }
+
     fn handleConfigProvider(self: *Gateway, request: *std.http.Server.Request) !void {
+        // Auth check for POST requests — validate X-Master-Key header before processing
+        if (request.head.method == .POST) {
+            if (self.getMasterKey()) |expected_key| {
+                // Find X-Master-Key in request headers
+                var provided_key: ?[]const u8 = null;
+                var it = request.iterateHeaders();
+                while (it.next()) |header| {
+                    if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                        provided_key = header.value;
+                        break;
+                    }
+                }
+
+                const key = provided_key orelse {
+                    // No X-Master-Key header provided
+                    try request.respond(
+                        \\{"error":"unauthorized","message":"X-Master-Key header required"}
+                    , .{
+                        .status = .unauthorized,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/json" },
+                            .{ .name = "access-control-allow-origin", .value = "*" },
+                        },
+                    });
+                    return;
+                };
+
+                if (!std.mem.eql(u8, key, expected_key)) {
+                    // Key doesn't match
+                    std.log.warn("Unauthorized /config/provider POST attempt (invalid master key)", .{});
+                    try request.respond(
+                        \\{"error":"forbidden","message":"Invalid master key"}
+                    , .{
+                        .status = .forbidden,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/json" },
+                            .{ .name = "access-control-allow-origin", .value = "*" },
+                        },
+                    });
+                    return;
+                }
+            }
+            // If no master key is configured, allow unauthenticated access (development mode)
+        }
+
         if (request.head.method == .GET) {
             const provider = blk: {
                 self.provider_mutex.lock();
