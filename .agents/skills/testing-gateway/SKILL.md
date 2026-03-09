@@ -6,6 +6,14 @@
 - Zig binary location on this VM: `/home/ubuntu/repos/nullclaw/zig-out/bin/nullclaw`
 - If Zig is not installed, download from: `https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz`
 
+If Zig 0.14.1 is not installed:
+```bash
+cd /tmp
+wget https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz
+tar xf zig-linux-x86_64-0.14.1.tar.xz
+export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
+```
+
 ## Build
 
 ```bash
@@ -35,6 +43,7 @@ Expect: 27+ checks passed with 0 failures.
 ### Gateway server
 ```bash
 ./zig-out/bin/nullclaw serve
+# Listens on http://127.0.0.1:3000
 ```
 Expect: "Gateway ready. Listening..." on port 3000.
 
@@ -57,6 +66,14 @@ curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
   -d '{"model":"smollm2:135m","messages":[{"role":"user","content":"say hi"}]}'
 ```
 Note: Requires Ollama (or configured provider) running. If provider is down, expect a connection error JSON — NOT a crash.
+
+### Install Ollama (if needed for chat completions testing)
+```bash
+sudo apt-get install -y zstd
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull smollm2:135m
+```
+Make sure `config.json` has the correct model name matching what's pulled in Ollama.
 
 ### POST /config/provider (auth-protected provider update)
 
@@ -106,13 +123,27 @@ curl -N -X POST http://127.0.0.1:3000/v1/chat/completions \
 ```
 Expect: `data: {...}` lines arriving incrementally, ending with `data: [DONE]`.
 
+## Key Endpoints
+
+- `POST /v1/chat/completions` — Chat completions (streaming if `stream:true`)
+- `GET /health` — Health check
+- `GET /status` — Provider status
+- `GET /config/provider` — Read current provider config
+- `POST /config/provider` — Runtime provider config update (requires X-Master-Key)
+- `OPTIONS /*` — CORS preflight
+
 ## Common Issues
 
 - **Wrong Zig version**: If build fails with unfamiliar errors, check `zig version` — must be 0.14.x, not 0.16.0-dev
 - **Port in use**: If gateway fails to start, check if another instance is running on port 3000
 - **Ollama not running**: Chat completions will return connection error JSON, but gateway should NOT crash
+- **Ollama 404**: The model name in the request must exactly match what's pulled in Ollama. Check with `ollama list`.
 - **Config not found**: Gateway looks for `config.json` in the current working directory
 
 ## Devin Secrets Needed
 
-None required for local testing. The `master_key` is set in `config.json` for auth testing.
+No secrets required for local Ollama testing. The `master_key` is set in `config.json` for auth testing.
+
+For cloud provider testing:
+- `OPENAI_API_KEY` — for OpenAI provider testing
+- `ANTHROPIC_API_KEY` — for Anthropic/Claude provider testing
