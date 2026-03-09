@@ -6,7 +6,7 @@ The gateway is written in Zig 0.14.1 (stable). The user's system may have Zig 0.
 
 ```bash
 # Ensure correct Zig version
-export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
+export PATH="/tmp/zig-linux-x86_64-0.14.1:$PATH"
 zig version  # Should show 0.14.1
 
 # Build
@@ -19,7 +19,7 @@ If Zig 0.14.1 is not installed:
 cd /tmp
 wget https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz
 tar xf zig-linux-x86_64-0.14.1.tar.xz
-export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
+export PATH="/tmp/zig-linux-x86_64-0.14.1:$PATH"
 ```
 
 ## Run Gateway
@@ -29,7 +29,7 @@ export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
 # Listens on http://127.0.0.1:3000
 ```
 
-The gateway reads `config.json` in the working directory for provider settings (type, base_url, api_key, model).
+The gateway reads `config.json` in the working directory for server settings (websocket/http host and port, secret store path, sandbox config, and channel definitions). Provider configuration (model, base URL) can be updated at runtime via `POST /config/provider`.
 
 ## Diagnostics
 
