@@ -18,6 +18,32 @@ fn appendJsonEscaped(list: *std.ArrayList(u8), input: []const u8) !void {
     }
 }
 
+/// Duplicate all string fields in a ProviderConfig so the caller owns the memory.
+fn dupeProviderConfig(allocator: std.mem.Allocator, src: ProviderConfig) !ProviderConfig {
+    const provider_str = try allocator.dupe(u8, src.provider);
+    errdefer allocator.free(provider_str);
+    const base_url_str = try allocator.dupe(u8, src.base_url);
+    errdefer allocator.free(base_url_str);
+    const api_key_str = try allocator.dupe(u8, src.api_key);
+    errdefer allocator.free(api_key_str);
+    const model_str = try allocator.dupe(u8, src.model);
+    errdefer allocator.free(model_str);
+    return ProviderConfig{
+        .provider = provider_str,
+        .base_url = base_url_str,
+        .api_key = api_key_str,
+        .model = model_str,
+    };
+}
+
+/// Free all string fields in a ProviderConfig that were heap-allocated.
+fn freeProviderConfig(allocator: std.mem.Allocator, p: ProviderConfig) void {
+    allocator.free(p.provider);
+    allocator.free(p.base_url);
+    allocator.free(p.api_key);
+    allocator.free(p.model);
+}
+
 /// Gateway is the main HTTP + WebSocket server for NullClaw.
 /// Routes /v1/chat/completions to configured LLM provider (Ollama, OpenAI, Anthropic, etc.)
 pub const Gateway = struct {
@@ -30,14 +56,23 @@ pub const Gateway = struct {
     provider_mutex: std.Thread.Mutex,
     start_time: i64,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config, event_bus: *EventBus) Gateway {
+    pub fn init(allocator: std.mem.Allocator, config: Config, event_bus: *EventBus) !Gateway {
         // Dupe all provider strings so active_provider always owns its memory
         // and can be safely freed on update or deinit.
+        const owned_provider_type = try allocator.dupe(u8, config.provider.provider);
+        errdefer allocator.free(owned_provider_type);
+        const owned_base_url = try allocator.dupe(u8, config.provider.base_url);
+        errdefer allocator.free(owned_base_url);
+        const owned_api_key = try allocator.dupe(u8, config.provider.api_key);
+        errdefer allocator.free(owned_api_key);
+        const owned_model = try allocator.dupe(u8, config.provider.model);
+        errdefer allocator.free(owned_model);
+
         const owned_provider = ProviderConfig{
-            .provider = allocator.dupe(u8, config.provider.provider) catch config.provider.provider,
-            .base_url = allocator.dupe(u8, config.provider.base_url) catch config.provider.base_url,
-            .api_key = allocator.dupe(u8, config.provider.api_key) catch config.provider.api_key,
-            .model = allocator.dupe(u8, config.provider.model) catch config.provider.model,
+            .provider = owned_provider_type,
+            .base_url = owned_base_url,
+            .api_key = owned_api_key,
+            .model = owned_model,
         };
         return .{
             .allocator = allocator,
@@ -53,10 +88,7 @@ pub const Gateway = struct {
 
     pub fn deinit(self: *Gateway) void {
         // Free heap-owned provider strings
-        self.allocator.free(self.active_provider.provider);
-        self.allocator.free(self.active_provider.base_url);
-        self.allocator.free(self.active_provider.api_key);
-        self.allocator.free(self.active_provider.model);
+        freeProviderConfig(self.allocator, self.active_provider);
 
         if (self.server) |*s| {
             s.deinit();
@@ -237,12 +269,24 @@ pub const Gateway = struct {
 
         self.event_bus.publishThought(body, "openai_compat");
 
-        // Get current provider config (thread-safe)
+        // Get current provider config (thread-safe deep copy)
         const provider = blk: {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk self.active_provider;
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"error":"internal_error","message":"Out of memory"}
+                , .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
         };
+        defer freeProviderConfig(self.allocator, provider);
 
         // Check if streaming is requested
         const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
@@ -763,8 +807,20 @@ pub const Gateway = struct {
         const provider = blk: {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk self.active_provider;
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"status":"running","version":"0.2.0"}
+                , .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
         };
+        defer freeProviderConfig(self.allocator, provider);
 
         const now = std.time.timestamp();
         const uptime = now - self.start_time;
@@ -848,8 +904,20 @@ pub const Gateway = struct {
             const provider = blk: {
                 self.provider_mutex.lock();
                 defer self.provider_mutex.unlock();
-                break :blk self.active_provider;
+                break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                    try request.respond(
+                        \\{"error":"internal_error"}
+                    , .{
+                        .status = .internal_server_error,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/json" },
+                            .{ .name = "access-control-allow-origin", .value = "*" },
+                        },
+                    });
+                    return;
+                };
             };
+            defer freeProviderConfig(self.allocator, provider);
 
             var response_buf: [2048]u8 = undefined;
             const response = std.fmt.bufPrint(&response_buf,
