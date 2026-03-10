@@ -8,7 +8,7 @@
 ## Quick Start
 
 ```bash
-cd /home/ubuntu/repos/nullclaw
+cd <repo-root>  # e.g. /path/to/nullclaw
 zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
 ./zig-out/bin/nullclaw doctor    # Verify system health (expect 27-28 passes)
 ./zig-out/bin/nullclaw serve     # Start gateway on port 3000
