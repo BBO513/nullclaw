@@ -97,7 +97,7 @@ All JSON responses include `access-control-allow-origin: *` CORS header.
 
 ## Doctor Diagnostics
 
-`nullclaw doctor` runs 7 check categories:
+`nullclaw doctor` runs 6 check categories:
 1. **Configuration** (3 checks): http_port valid, websocket_port valid, memory limit sane
 2. **Network Endpoints** (1 port-bind check + 3 INFO lines): tries to bind the configured port
 3. **Communication Channels** (18 checks): registers all 18 default channels
@@ -124,7 +124,7 @@ The service file includes security hardening: NoNewPrivileges, ProtectSystem=str
 
 ## Common Pitfalls
 
-- **Zig version mismatch**: `std.process.argsAlloc` was removed in Zig 0.15+. If you see errors about missing std functions, check `zig version`.
+- **Zig version mismatch**: `std.process.argsWithAllocator` was removed in Zig 0.15+. If you see errors about missing std functions, check `zig version`.
 - **Snap Zig**: Ubuntu's snap Zig package often installs nightly (0.16.0-dev). Always install 0.14.1 manually.
 - **Port 3000 in use**: Gateway fails to start if port is occupied. Kill other processes or change `http_port` in config.json.
 - **Config not found**: Gateway looks for `config.json` in the current working directory, not the binary's directory.
