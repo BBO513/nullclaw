@@ -98,7 +98,11 @@ pub const Doctor = struct {
         var event_bus = EventBus.init(self.allocator);
         defer event_bus.deinit();
 
-        var gw = Gateway.init(self.allocator, self.config, &event_bus);
+        var gw = Gateway.init(self.allocator, self.config, &event_bus) catch {
+            try self.fail("Gateway init failed (OOM)");
+            try self.stdout.writeAll("\n");
+            return;
+        };
         defer gw.deinit();
 
         const port_ok = gw.checkPort() catch false;

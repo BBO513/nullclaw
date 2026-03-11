@@ -3,57 +3,106 @@
 ## Prerequisites
 
 - Zig 0.14.1 (stable). The codebase is NOT compatible with Zig 0.16.0-dev (nightly) due to major std lib changes.
-- See `.agents/skills/building-nullclaw/SKILL.md` for Zig installation instructions.
+- Zig binary location on this VM: `/home/ubuntu/repos/nullclaw/zig-out/bin/nullclaw`
 
-## Quick Start
+If Zig 0.14.1 is not installed:
+```bash
+cd /tmp
+wget https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz
+tar xf zig-linux-x86_64-0.14.1.tar.xz
+export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
+```
+
+## Build
 
 ```bash
 cd /home/ubuntu/repos/nullclaw
 zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
-./zig-out/bin/nullclaw doctor    # Verify system health (expect 27-28 passes)
-./zig-out/bin/nullclaw serve     # Start gateway on port 3000
 ```
 
-## Testing Endpoints
+Build output: `./zig-out/bin/nullclaw`
 
-With the gateway running, open a second terminal:
+## Configuration
 
-### Health Check
+Config file: `config.json` in the working directory. Schema defined in `src/config.zig`:
+
+```json
+{
+    "websocket_host": "127.0.0.1",
+    "websocket_port": 3000,
+    "http_host": "127.0.0.1",
+    "http_port": 3000,
+    "secret_store_path": "/var/lib/nullclaw/secrets.enc",
+    "sandbox_enabled": true,
+    "max_memory_bytes": 1048576,
+    "channels": [ ... ]
+}
+```
+
+Fields: `websocket_host`, `websocket_port`, `http_host`, `http_port`, `secret_store_path`, `sandbox_enabled`, `max_memory_bytes`, and `channels` (array of `{ name, enabled, endpoint, auth_token_key }`).
+
+There is no `provider`, `master_key`, or `api_key` field in the committed config.
+
+## Running
+
+### Doctor (diagnostics)
 ```bash
-curl -s http://127.0.0.1:3000/health
+./zig-out/bin/nullclaw doctor
 ```
-Expected: `{"status":"healthy","service":"nullclaw-nexus","version":"0.1.0"}`
+Runs 7 check categories (`src/doctor.zig`): Configuration (3 checks), Network Endpoints (1 port-bind check + 3 INFO lines), Communication Channels (18 channel registrations), Secret Store / ChaCha20-Poly1305 (3 checks), Sandbox / Landlock (2 checks), and Resource Limits (1 check). Total pass count depends on Landlock availability and channel health but expect 27-28 with 0 failures on a typical system.
 
-### Chat Completions (stub)
+### Gateway server
+```bash
+./zig-out/bin/nullclaw serve
+```
+Expect: `Gateway is ready. Listening...` on port 3000 (v0.1.0).
+
+## Gateway Endpoints
+
+The gateway (`src/gateway.zig`) routes exactly 4 paths:
+
+### 1. `/ws` — WebSocket upgrade
+Upgrades to WebSocket. Text messages are published to the internal event bus and echoed back as `{"type":"agent_response","status":"acknowledged"}`. Binary messages are published as tool calls. Pings are answered with pongs.
+
+### 2. `POST /v1/chat/completions` — Chat completions (stub)
+Accepts POST only (returns 405 for other methods). Reads the request body, publishes it to the internal event bus as an `agent_thought`, and returns a **hardcoded stub response** — it does NOT proxy to Ollama or any LLM provider.
+
 ```bash
 curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"any","messages":[{"role":"user","content":"hi"}]}'
 ```
-Expected: OpenAI-compatible JSON with `"model":"nullclaw-nexus-v0.1"` and `"content":"NullClaw Nexus agent processing your request."`. This is a **hardcoded stub** — it does NOT call any LLM.
 
-### Chat Completions — wrong method
-```bash
-curl -s http://127.0.0.1:3000/v1/chat/completions
+Expected response:
+```json
+{"id":"chatcmpl-nullclaw-<timestamp>","object":"chat.completion","created":<timestamp>,"model":"nullclaw-nexus-v0.1","choices":[{"index":0,"message":{"role":"assistant","content":"NullClaw Nexus agent processing your request."},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
 ```
-Expected: `{"error":"method_not_allowed","message":"POST required"}`
 
-### 404 for unknown paths
+### 3. `GET /health` — Health check
+```bash
+curl -s http://127.0.0.1:3000/health
+```
+
+Expected response:
+```json
+{"status":"healthy","service":"nullclaw-nexus","version":"0.1.0"}
+```
+
+### 4. Everything else — 404
 ```bash
 curl -s http://127.0.0.1:3000/anything-else
 ```
-Expected: `{"error":"not_found","message":"Unknown endpoint"}`
 
-### WebSocket
-```bash
-# If websocat is available:
-echo '{"type":"ping"}' | websocat ws://127.0.0.1:3000/ws
+Expected response:
+```json
+{"error":"not_found","message":"Unknown endpoint"}
 ```
-Expected: `{"type":"agent_response","status":"acknowledged"}`
+
+There is no `/status` endpoint, no `/config/provider` endpoint, no auth/X-Master-Key handling, and no SSE streaming.
 
 ## Stress Test
 
-Fire parallel requests to verify stability:
+Fire parallel requests at the two functional endpoints to verify stability:
 ```bash
 for i in $(seq 1 20); do curl -s http://127.0.0.1:3000/health > /dev/null 2>&1 & done
 for i in $(seq 1 5); do curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
@@ -63,24 +112,14 @@ wait
 echo "All requests completed"
 curl -s http://127.0.0.1:3000/health
 ```
-Expect: All requests complete, health returns valid JSON, no gateway crashes.
-
-## What Does NOT Exist on Main
-
-Do NOT test for these — they are not implemented on the `main` branch:
-- `/status` endpoint
-- `/config/provider` endpoint
-- `X-Master-Key` authentication
-- SSE streaming responses
-- Provider routing to Ollama/OpenAI/Anthropic
-- `master_key` or `provider` config fields
+Expect: All requests complete without crashes, health returns valid JSON.
 
 ## Common Issues
 
-- **Wrong Zig version**: Build fails with unfamiliar errors → check `zig version`, must be 0.14.x
-- **Port in use**: Gateway fails to start → check if another instance is on port 3000
+- **Wrong Zig version**: If build fails with unfamiliar errors, check `zig version` — must be 0.14.x, not 0.16.0-dev
+- **Port in use**: If gateway fails to start, check if another instance is running on port 3000
 - **Config not found**: Gateway looks for `config.json` in the current working directory
 
-## Secrets Needed
+## Devin Secrets Needed
 
 None required. The gateway has no auth and no external provider dependencies.
