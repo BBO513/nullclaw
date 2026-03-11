@@ -4,6 +4,18 @@ const Event = @import("event_bus.zig").Event;
 const Config = @import("config.zig").Config;
 const ProviderConfig = @import("config.zig").ProviderConfig;
 
+/// Constant-time comparison of two byte slices to prevent timing attacks.
+/// Returns true if and only if both slices have the same length and identical contents.
+/// Unlike std.mem.eql, this always compares all bytes regardless of where mismatches occur.
+fn constantTimeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| {
+        diff |= x ^ y;
+    }
+    return diff == 0;
+}
+
 /// Escape a string for JSON output
 fn appendJsonEscaped(list: *std.ArrayList(u8), input: []const u8) !void {
     for (input) |c| {
@@ -900,7 +912,7 @@ pub const Gateway = struct {
             return false;
         };
 
-        if (!std.mem.eql(u8, token, expected_key)) {
+        if (!constantTimeEql(token, expected_key)) {
             std.log.warn("Unauthorized request attempt (invalid token)", .{});
             try request.respond(
                 \\{"error":"forbidden","message":"Invalid authentication token"}

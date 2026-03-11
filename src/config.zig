@@ -30,8 +30,8 @@ pub const Config = struct {
     channels: []const ChannelConfig = &default_channels,
     /// LLM provider routing configuration
     provider: ProviderConfig = .{},
-    /// Master key for authenticating admin endpoints (e.g. /config/provider POST)
-    /// If empty, falls back to NULLCLAW_MASTER_KEY env var. If both empty, admin endpoints are unprotected.
+    /// Master key for authenticating all endpoints except /health.
+    /// If empty, falls back to NULLCLAW_MASTER_KEY env var. If both empty, all endpoints are unprotected.
     master_key: []const u8 = "",
 
     pub const default_channels: [18]ChannelConfig = .{
