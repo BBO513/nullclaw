@@ -877,11 +877,11 @@ pub const Gateway = struct {
                 // Expect "Bearer <token>"
                 if (val.len > 7 and std.mem.eql(u8, val[0..7], "Bearer ")) {
                     provided_token = val[7..];
+                    break;
                 }
-                break;
-            }
-            // Also accept X-Master-Key for backwards compatibility
-            if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                // Authorization header present but not Bearer — keep looking for X-Master-Key
+            } else if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                // Also accept X-Master-Key for backwards compatibility
                 provided_token = header.value;
                 break;
             }
@@ -1011,16 +1011,28 @@ pub const Gateway = struct {
         // This ensures the update is atomic — either all fields update or none do.
         // On OOM, we clean up all previously-allocated strings and return an error.
         //
-        // We use dupeProviderConfig to allocate all 4 fields at once (it has proper
-        // errdefer chains internally). We merge the JSON fields into a temporary
-        // ProviderConfig first, then dupe the whole thing.
+        // We take a deep copy of the current provider under the mutex first, so
+        // we can safely read current values outside the lock without risk of
+        // use-after-free if another thread updates the provider concurrently.
 
-        // Start from current provider (thread-safe snapshot for reading defaults)
+        // Take a deep copy of the current provider (thread-safe)
         const current = blk: {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk self.active_provider;
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"error":"internal_error","message":"Out of memory"}
+                , .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
         };
+        defer freeProviderConfig(self.allocator, current);
 
         // Build merged config using JSON values or falling back to current values.
         // These slices are borrowed (not owned) — we'll dupe everything in one shot below.
