@@ -18,6 +18,32 @@ fn appendJsonEscaped(list: *std.ArrayList(u8), input: []const u8) !void {
     }
 }
 
+/// Duplicate all string fields in a ProviderConfig so the caller owns the memory.
+fn dupeProviderConfig(allocator: std.mem.Allocator, src: ProviderConfig) !ProviderConfig {
+    const provider_str = try allocator.dupe(u8, src.provider);
+    errdefer allocator.free(provider_str);
+    const base_url_str = try allocator.dupe(u8, src.base_url);
+    errdefer allocator.free(base_url_str);
+    const api_key_str = try allocator.dupe(u8, src.api_key);
+    errdefer allocator.free(api_key_str);
+    const model_str = try allocator.dupe(u8, src.model);
+    errdefer allocator.free(model_str);
+    return ProviderConfig{
+        .provider = provider_str,
+        .base_url = base_url_str,
+        .api_key = api_key_str,
+        .model = model_str,
+    };
+}
+
+/// Free all string fields in a ProviderConfig that were heap-allocated.
+fn freeProviderConfig(allocator: std.mem.Allocator, p: ProviderConfig) void {
+    allocator.free(p.provider);
+    allocator.free(p.base_url);
+    allocator.free(p.api_key);
+    allocator.free(p.model);
+}
+
 /// Gateway is the main HTTP + WebSocket server for NullClaw.
 /// Routes /v1/chat/completions to configured LLM provider (Ollama, OpenAI, Anthropic, etc.)
 pub const Gateway = struct {
@@ -30,14 +56,23 @@ pub const Gateway = struct {
     provider_mutex: std.Thread.Mutex,
     start_time: i64,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config, event_bus: *EventBus) Gateway {
+    pub fn init(allocator: std.mem.Allocator, config: Config, event_bus: *EventBus) !Gateway {
         // Dupe all provider strings so active_provider always owns its memory
         // and can be safely freed on update or deinit.
+        const owned_provider_type = try allocator.dupe(u8, config.provider.provider);
+        errdefer allocator.free(owned_provider_type);
+        const owned_base_url = try allocator.dupe(u8, config.provider.base_url);
+        errdefer allocator.free(owned_base_url);
+        const owned_api_key = try allocator.dupe(u8, config.provider.api_key);
+        errdefer allocator.free(owned_api_key);
+        const owned_model = try allocator.dupe(u8, config.provider.model);
+        errdefer allocator.free(owned_model);
+
         const owned_provider = ProviderConfig{
-            .provider = allocator.dupe(u8, config.provider.provider) catch config.provider.provider,
-            .base_url = allocator.dupe(u8, config.provider.base_url) catch config.provider.base_url,
-            .api_key = allocator.dupe(u8, config.provider.api_key) catch config.provider.api_key,
-            .model = allocator.dupe(u8, config.provider.model) catch config.provider.model,
+            .provider = owned_provider_type,
+            .base_url = owned_base_url,
+            .api_key = owned_api_key,
+            .model = owned_model,
         };
         return .{
             .allocator = allocator,
@@ -53,10 +88,7 @@ pub const Gateway = struct {
 
     pub fn deinit(self: *Gateway) void {
         // Free heap-owned provider strings
-        self.allocator.free(self.active_provider.provider);
-        self.allocator.free(self.active_provider.base_url);
-        self.allocator.free(self.active_provider.api_key);
-        self.allocator.free(self.active_provider.model);
+        freeProviderConfig(self.allocator, self.active_provider);
 
         if (self.server) |*s| {
             s.deinit();
@@ -128,12 +160,19 @@ pub const Gateway = struct {
             return;
         }
 
+        // /health is always unauthenticated (used for monitoring/healthchecks)
+        if (std.mem.eql(u8, target, "/health")) {
+            try self.handleHealth(request);
+            return;
+        }
+
+        // All other endpoints require Bearer token auth when a master key is configured
+        if (!try self.checkBearerAuth(request)) return;
+
         if (std.mem.eql(u8, target, "/ws")) {
             try self.handleWebSocketUpgrade(request);
         } else if (std.mem.eql(u8, target, "/v1/chat/completions")) {
             try self.handleChatCompletions(request);
-        } else if (std.mem.eql(u8, target, "/health")) {
-            try self.handleHealth(request);
         } else if (std.mem.eql(u8, target, "/status")) {
             try self.handleStatus(request);
         } else if (std.mem.eql(u8, target, "/config/provider")) {
@@ -237,12 +276,24 @@ pub const Gateway = struct {
 
         self.event_bus.publishThought(body, "openai_compat");
 
-        // Get current provider config (thread-safe)
+        // Get current provider config (thread-safe deep copy)
         const provider = blk: {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk self.active_provider;
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"error":"internal_error","message":"Out of memory"}
+                , .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
         };
+        defer freeProviderConfig(self.allocator, provider);
 
         // Check if streaming is requested
         const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
@@ -763,8 +814,20 @@ pub const Gateway = struct {
         const provider = blk: {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk self.active_provider;
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"status":"running","version":"0.2.0"}
+                , .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
         };
+        defer freeProviderConfig(self.allocator, provider);
 
         const now = std.time.timestamp();
         const uptime = now - self.start_time;
@@ -791,13 +854,90 @@ pub const Gateway = struct {
         });
     }
 
+    /// Resolve the master key: config value takes precedence, falls back to NULLCLAW_MASTER_KEY env var.
+    /// Returns null if no master key is configured (admin endpoints are unprotected).
+    fn getMasterKey(self: *Gateway) ?[]const u8 {
+        if (self.config.master_key.len > 0) return self.config.master_key;
+        return std.posix.getenv("NULLCLAW_MASTER_KEY");
+    }
+
+    /// Centralized Bearer token auth check. Extracts "Authorization: Bearer <token>" header
+    /// and validates it against the configured master key. Returns true if authorized.
+    /// If no master key is configured, allows all requests (dev mode).
+    /// On auth failure, sends the appropriate error response and returns false.
+    fn checkBearerAuth(self: *Gateway, request: *std.http.Server.Request) !bool {
+        const expected_key = self.getMasterKey() orelse return true; // No key configured = dev mode
+
+        // Find Authorization header
+        var provided_token: ?[]const u8 = null;
+        var it = request.iterateHeaders();
+        while (it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                const val = header.value;
+                // Expect "Bearer <token>"
+                if (val.len > 7 and std.mem.eql(u8, val[0..7], "Bearer ")) {
+                    provided_token = val[7..];
+                    break;
+                }
+                // Authorization header present but not Bearer — keep looking for X-Master-Key
+            } else if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                // Also accept X-Master-Key for backwards compatibility
+                provided_token = header.value;
+                break;
+            }
+        }
+
+        const token = provided_token orelse {
+            try request.respond(
+                \\{"error":"unauthorized","message":"Authorization header required (Bearer token or X-Master-Key)"}
+            , .{
+                .status = .unauthorized,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return false;
+        };
+
+        if (!std.mem.eql(u8, token, expected_key)) {
+            std.log.warn("Unauthorized request attempt (invalid token)", .{});
+            try request.respond(
+                \\{"error":"forbidden","message":"Invalid authentication token"}
+            , .{
+                .status = .forbidden,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return false;
+        }
+
+        return true;
+    }
+
     fn handleConfigProvider(self: *Gateway, request: *std.http.Server.Request) !void {
+        // Auth is already checked by handleRequest() via checkBearerAuth()
+
         if (request.head.method == .GET) {
             const provider = blk: {
                 self.provider_mutex.lock();
                 defer self.provider_mutex.unlock();
-                break :blk self.active_provider;
+                break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                    try request.respond(
+                        \\{"error":"internal_error"}
+                    , .{
+                        .status = .internal_server_error,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/json" },
+                            .{ .name = "access-control-allow-origin", .value = "*" },
+                        },
+                    });
+                    return;
+                };
             };
+            defer freeProviderConfig(self.allocator, provider);
 
             var response_buf: [2048]u8 = undefined;
             const response = std.fmt.bufPrint(&response_buf,
@@ -867,50 +1007,68 @@ pub const Gateway = struct {
             return;
         }
 
+        // Build the complete new provider config OUTSIDE the mutex.
+        // This ensures the update is atomic — either all fields update or none do.
+        // On OOM, we clean up all previously-allocated strings and return an error.
+        //
+        // We take a deep copy of the current provider under the mutex first, so
+        // we can safely read current values outside the lock without risk of
+        // use-after-free if another thread updates the provider concurrently.
+
+        // Take a deep copy of the current provider (thread-safe)
+        const current = blk: {
+            self.provider_mutex.lock();
+            defer self.provider_mutex.unlock();
+            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+                try request.respond(
+                    \\{"error":"internal_error","message":"Out of memory"}
+                , .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
+        };
+        defer freeProviderConfig(self.allocator, current);
+
+        // Build merged config using JSON values or falling back to current values.
+        // These slices are borrowed (not owned) — we'll dupe everything in one shot below.
+        const merged = ProviderConfig{
+            .provider = if (root.object.get("type")) |v| (if (v == .string) v.string else current.provider) else current.provider,
+            .base_url = if (root.object.get("base_url")) |v| (if (v == .string) v.string else current.base_url) else current.base_url,
+            .api_key = if (root.object.get("api_key")) |v| (if (v == .string) v.string else current.api_key) else current.api_key,
+            .model = if (root.object.get("model")) |v| (if (v == .string) v.string else current.model) else current.model,
+        };
+
+        // Dupe all 4 strings at once — dupeProviderConfig has proper errdefer cleanup
+        // so if any allocation fails, all previously-allocated strings are freed.
+        const new_config = dupeProviderConfig(self.allocator, merged) catch {
+            try request.respond(
+                \\{"error":"internal_error","message":"Out of memory"}
+            , .{
+                .status = .internal_server_error,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        // Atomic swap under the mutex: swap the whole struct, then free old values.
         {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
 
-            if (root.object.get("type")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.provider;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.provider;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.provider = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("base_url")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.base_url;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.base_url;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.base_url = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("api_key")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.api_key;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.api_key;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.api_key = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("model")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.model;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.model;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.model = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
+            const old_provider = self.active_provider;
+            self.active_provider = new_config;
+
+            // Free old heap-owned strings
+            freeProviderConfig(self.allocator, old_provider);
+
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
 
