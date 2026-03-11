@@ -160,12 +160,19 @@ pub const Gateway = struct {
             return;
         }
 
+        // /health is always unauthenticated (used for monitoring/healthchecks)
+        if (std.mem.eql(u8, target, "/health")) {
+            try self.handleHealth(request);
+            return;
+        }
+
+        // All other endpoints require Bearer token auth when a master key is configured
+        if (!try self.checkBearerAuth(request)) return;
+
         if (std.mem.eql(u8, target, "/ws")) {
             try self.handleWebSocketUpgrade(request);
         } else if (std.mem.eql(u8, target, "/v1/chat/completions")) {
             try self.handleChatCompletions(request);
-        } else if (std.mem.eql(u8, target, "/health")) {
-            try self.handleHealth(request);
         } else if (std.mem.eql(u8, target, "/status")) {
             try self.handleStatus(request);
         } else if (std.mem.eql(u8, target, "/config/provider")) {
@@ -854,51 +861,64 @@ pub const Gateway = struct {
         return std.posix.getenv("NULLCLAW_MASTER_KEY");
     }
 
-    fn handleConfigProvider(self: *Gateway, request: *std.http.Server.Request) !void {
-        // Auth check for POST requests — validate X-Master-Key header before processing
-        if (request.head.method == .POST) {
-            if (self.getMasterKey()) |expected_key| {
-                // Find X-Master-Key in request headers
-                var provided_key: ?[]const u8 = null;
-                var it = request.iterateHeaders();
-                while (it.next()) |header| {
-                    if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
-                        provided_key = header.value;
-                        break;
-                    }
-                }
+    /// Centralized Bearer token auth check. Extracts "Authorization: Bearer <token>" header
+    /// and validates it against the configured master key. Returns true if authorized.
+    /// If no master key is configured, allows all requests (dev mode).
+    /// On auth failure, sends the appropriate error response and returns false.
+    fn checkBearerAuth(self: *Gateway, request: *std.http.Server.Request) !bool {
+        const expected_key = self.getMasterKey() orelse return true; // No key configured = dev mode
 
-                const key = provided_key orelse {
-                    // No X-Master-Key header provided
-                    try request.respond(
-                        \\{"error":"unauthorized","message":"X-Master-Key header required"}
-                    , .{
-                        .status = .unauthorized,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "application/json" },
-                            .{ .name = "access-control-allow-origin", .value = "*" },
-                        },
-                    });
-                    return;
-                };
-
-                if (!std.mem.eql(u8, key, expected_key)) {
-                    // Key doesn't match
-                    std.log.warn("Unauthorized /config/provider POST attempt (invalid master key)", .{});
-                    try request.respond(
-                        \\{"error":"forbidden","message":"Invalid master key"}
-                    , .{
-                        .status = .forbidden,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "application/json" },
-                            .{ .name = "access-control-allow-origin", .value = "*" },
-                        },
-                    });
-                    return;
+        // Find Authorization header
+        var provided_token: ?[]const u8 = null;
+        var it = request.iterateHeaders();
+        while (it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                const val = header.value;
+                // Expect "Bearer <token>"
+                if (val.len > 7 and std.mem.eql(u8, val[0..7], "Bearer ")) {
+                    provided_token = val[7..];
                 }
+                break;
             }
-            // If no master key is configured, allow unauthenticated access (development mode)
+            // Also accept X-Master-Key for backwards compatibility
+            if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                provided_token = header.value;
+                break;
+            }
         }
+
+        const token = provided_token orelse {
+            try request.respond(
+                \\{"error":"unauthorized","message":"Authorization header required (Bearer token or X-Master-Key)"}
+            , .{
+                .status = .unauthorized,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return false;
+        };
+
+        if (!std.mem.eql(u8, token, expected_key)) {
+            std.log.warn("Unauthorized request attempt (invalid token)", .{});
+            try request.respond(
+                \\{"error":"forbidden","message":"Invalid authentication token"}
+            , .{
+                .status = .forbidden,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return false;
+        }
+
+        return true;
+    }
+
+    fn handleConfigProvider(self: *Gateway, request: *std.http.Server.Request) !void {
+        // Auth is already checked by handleRequest() via checkBearerAuth()
 
         if (request.head.method == .GET) {
             const provider = blk: {
@@ -987,50 +1007,56 @@ pub const Gateway = struct {
             return;
         }
 
+        // Build the complete new provider config OUTSIDE the mutex.
+        // This ensures the update is atomic — either all fields update or none do.
+        // On OOM, we clean up all previously-allocated strings and return an error.
+        //
+        // We use dupeProviderConfig to allocate all 4 fields at once (it has proper
+        // errdefer chains internally). We merge the JSON fields into a temporary
+        // ProviderConfig first, then dupe the whole thing.
+
+        // Start from current provider (thread-safe snapshot for reading defaults)
+        const current = blk: {
+            self.provider_mutex.lock();
+            defer self.provider_mutex.unlock();
+            break :blk self.active_provider;
+        };
+
+        // Build merged config using JSON values or falling back to current values.
+        // These slices are borrowed (not owned) — we'll dupe everything in one shot below.
+        const merged = ProviderConfig{
+            .provider = if (root.object.get("type")) |v| (if (v == .string) v.string else current.provider) else current.provider,
+            .base_url = if (root.object.get("base_url")) |v| (if (v == .string) v.string else current.base_url) else current.base_url,
+            .api_key = if (root.object.get("api_key")) |v| (if (v == .string) v.string else current.api_key) else current.api_key,
+            .model = if (root.object.get("model")) |v| (if (v == .string) v.string else current.model) else current.model,
+        };
+
+        // Dupe all 4 strings at once — dupeProviderConfig has proper errdefer cleanup
+        // so if any allocation fails, all previously-allocated strings are freed.
+        const new_config = dupeProviderConfig(self.allocator, merged) catch {
+            try request.respond(
+                \\{"error":"internal_error","message":"Out of memory"}
+            , .{
+                .status = .internal_server_error,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        // Atomic swap under the mutex: swap the whole struct, then free old values.
         {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
 
-            if (root.object.get("type")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.provider;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.provider;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.provider = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("base_url")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.base_url;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.base_url;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.base_url = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("api_key")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.api_key;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.api_key;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.api_key = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
-            if (root.object.get("model")) |v| {
-                if (v == .string) {
-                    const old = self.active_provider.model;
-                    const new_val = self.allocator.dupe(u8, v.string) catch self.active_provider.model;
-                    if (new_val.ptr != old.ptr) {
-                        self.active_provider.model = new_val;
-                        self.allocator.free(old);
-                    }
-                }
-            }
+            const old_provider = self.active_provider;
+            self.active_provider = new_config;
+
+            // Free old heap-owned strings
+            freeProviderConfig(self.allocator, old_provider);
+
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
 
