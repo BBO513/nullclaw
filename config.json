@@ -6,6 +6,12 @@
     "secret_store_path": "/var/lib/nullclaw/secrets.enc",
     "sandbox_enabled": true,
     "max_memory_bytes": 1048576,
+    "provider": {
+        "type": "ollama",
+        "base_url": "http://localhost:11434",
+        "api_key": "",
+        "model": "llama3.1"
+    },
     "channels": [
         { "name": "whatsapp", "enabled": true, "endpoint": "https://api.twilio.com/2010-04-01", "auth_token_key": "WHATSAPP_TOKEN" },
         { "name": "twilio_sms", "enabled": true, "endpoint": "https://api.twilio.com/2010-04-01", "auth_token_key": "TWILIO_TOKEN" },

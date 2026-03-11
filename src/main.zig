@@ -134,7 +134,7 @@ fn runServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Start the gateway
-    var gateway = Gateway.init(allocator, config, &event_bus);
+    var gateway = try Gateway.init(allocator, config, &event_bus);
     defer gateway.deinit();
 
     try gateway.start();

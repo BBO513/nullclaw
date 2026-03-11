@@ -7,6 +7,18 @@ pub const ChannelConfig = struct {
     auth_token_key: ?[]const u8 = null,
 };
 
+/// Provider configuration for LLM routing
+pub const ProviderConfig = struct {
+    /// Provider type: "ollama", "openai", "anthropic", "groq", "together", "openrouter", "custom"
+    provider: []const u8 = "ollama",
+    /// Base URL for the provider API
+    base_url: []const u8 = "http://localhost:11434",
+    /// API key (empty for Ollama/local providers)
+    api_key: []const u8 = "",
+    /// Default model to use
+    model: []const u8 = "llama3.1",
+};
+
 pub const Config = struct {
     websocket_host: []const u8 = "127.0.0.1",
     websocket_port: u16 = 3000,
@@ -16,6 +28,11 @@ pub const Config = struct {
     sandbox_enabled: bool = true,
     max_memory_bytes: u64 = 1_048_576,
     channels: []const ChannelConfig = &default_channels,
+    /// LLM provider routing configuration
+    provider: ProviderConfig = .{},
+    /// Master key for authenticating admin endpoints (e.g. /config/provider POST)
+    /// If empty, falls back to NULLCLAW_MASTER_KEY env var. If both empty, admin endpoints are unprotected.
+    master_key: []const u8 = "",
 
     pub const default_channels: [18]ChannelConfig = .{
         .{ .name = "whatsapp", .enabled = true, .endpoint = "https://api.twilio.com/2010-04-01", .auth_token_key = "WHATSAPP_TOKEN" },
@@ -85,6 +102,29 @@ pub const Config = struct {
         }
         if (root.object.get("max_memory_bytes")) |v| {
             if (v == .integer) config.max_memory_bytes = @intCast(v.integer);
+        }
+
+        // Master key
+        if (root.object.get("master_key")) |v| {
+            if (v == .string) config.master_key = try allocator.dupe(u8, v.string);
+        }
+
+        // Provider config
+        if (root.object.get("provider")) |pv| {
+            if (pv == .object) {
+                if (pv.object.get("type")) |v| {
+                    if (v == .string) config.provider.provider = try allocator.dupe(u8, v.string);
+                }
+                if (pv.object.get("base_url")) |v| {
+                    if (v == .string) config.provider.base_url = try allocator.dupe(u8, v.string);
+                }
+                if (pv.object.get("api_key")) |v| {
+                    if (v == .string) config.provider.api_key = try allocator.dupe(u8, v.string);
+                }
+                if (pv.object.get("model")) |v| {
+                    if (v == .string) config.provider.model = try allocator.dupe(u8, v.string);
+                }
+            }
         }
 
         return config;
