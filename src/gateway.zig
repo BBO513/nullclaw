@@ -295,9 +295,19 @@ pub const Gateway = struct {
         };
         defer freeProviderConfig(self.allocator, provider);
 
-        // Check if streaming is requested
-        const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
-            std.mem.indexOf(u8, body, "\"stream\": true") != null;
+        // Check if streaming is requested by parsing the JSON "stream" field properly.
+        // This avoids false positives from string values and false negatives from whitespace.
+        const is_stream = blk: {
+            const stream_parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch break :blk false;
+            defer stream_parsed.deinit();
+            const stream_root = stream_parsed.value;
+            if (stream_root == .object) {
+                if (stream_root.object.get("stream")) |sv| {
+                    if (sv == .bool) break :blk sv.bool;
+                }
+            }
+            break :blk false;
+        };
 
         std.log.info("Forwarding to {s} at {s} (stream={s})", .{
             provider.provider,
@@ -868,8 +878,10 @@ pub const Gateway = struct {
     fn checkBearerAuth(self: *Gateway, request: *std.http.Server.Request) !bool {
         const expected_key = self.getMasterKey() orelse return true; // No key configured = dev mode
 
-        // Find Authorization header
+        // Scan all headers. A valid Bearer token takes priority; if none is found,
+        // fall back to X-Master-Key (backwards compatibility).
         var provided_token: ?[]const u8 = null;
+        var master_key_fallback: ?[]const u8 = null;
         var it = request.iterateHeaders();
         while (it.next()) |header| {
             if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
@@ -877,15 +889,18 @@ pub const Gateway = struct {
                 // Expect "Bearer <token>"
                 if (val.len > 7 and std.mem.eql(u8, val[0..7], "Bearer ")) {
                     provided_token = val[7..];
+                    break; // Valid Bearer found — use it immediately
                 }
-                break;
+                // Non-Bearer Authorization header — keep looking for X-Master-Key
+                continue;
             }
             // Also accept X-Master-Key for backwards compatibility
             if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
-                provided_token = header.value;
-                break;
+                master_key_fallback = header.value;
             }
         }
+        // Fall back to X-Master-Key if no valid Bearer token was found
+        if (provided_token == null) provided_token = master_key_fallback;
 
         const token = provided_token orelse {
             try request.respond(
