@@ -1009,96 +1009,53 @@ pub const Gateway = struct {
 
         // Build the complete new provider config OUTSIDE the mutex.
         // This ensures the update is atomic — either all fields update or none do.
-        // On OOM, we return an error instead of leaving a partially-updated config.
-        const new_type = if (root.object.get("type")) |v|
-            (if (v == .string) self.allocator.dupe(u8, v.string) catch {
-                try request.respond(
-                    \\{"error":"internal_error","message":"Out of memory"}
-                , .{
-                    .status = .internal_server_error,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/json" },
-                        .{ .name = "access-control-allow-origin", .value = "*" },
-                    },
-                });
-                return;
-            } else null)
-        else
-            null;
-        errdefer if (new_type) |s| self.allocator.free(s);
+        // On OOM, we clean up all previously-allocated strings and return an error.
+        //
+        // We use dupeProviderConfig to allocate all 4 fields at once (it has proper
+        // errdefer chains internally). We merge the JSON fields into a temporary
+        // ProviderConfig first, then dupe the whole thing.
 
-        const new_base_url = if (root.object.get("base_url")) |v|
-            (if (v == .string) self.allocator.dupe(u8, v.string) catch {
-                try request.respond(
-                    \\{"error":"internal_error","message":"Out of memory"}
-                , .{
-                    .status = .internal_server_error,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/json" },
-                        .{ .name = "access-control-allow-origin", .value = "*" },
-                    },
-                });
-                return;
-            } else null)
-        else
-            null;
-        errdefer if (new_base_url) |s| self.allocator.free(s);
+        // Start from current provider (thread-safe snapshot for reading defaults)
+        const current = blk: {
+            self.provider_mutex.lock();
+            defer self.provider_mutex.unlock();
+            break :blk self.active_provider;
+        };
 
-        const new_api_key = if (root.object.get("api_key")) |v|
-            (if (v == .string) self.allocator.dupe(u8, v.string) catch {
-                try request.respond(
-                    \\{"error":"internal_error","message":"Out of memory"}
-                , .{
-                    .status = .internal_server_error,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/json" },
-                        .{ .name = "access-control-allow-origin", .value = "*" },
-                    },
-                });
-                return;
-            } else null)
-        else
-            null;
-        errdefer if (new_api_key) |s| self.allocator.free(s);
+        // Build merged config using JSON values or falling back to current values.
+        // These slices are borrowed (not owned) — we'll dupe everything in one shot below.
+        const merged = ProviderConfig{
+            .provider = if (root.object.get("type")) |v| (if (v == .string) v.string else current.provider) else current.provider,
+            .base_url = if (root.object.get("base_url")) |v| (if (v == .string) v.string else current.base_url) else current.base_url,
+            .api_key = if (root.object.get("api_key")) |v| (if (v == .string) v.string else current.api_key) else current.api_key,
+            .model = if (root.object.get("model")) |v| (if (v == .string) v.string else current.model) else current.model,
+        };
 
-        const new_model = if (root.object.get("model")) |v|
-            (if (v == .string) self.allocator.dupe(u8, v.string) catch {
-                try request.respond(
-                    \\{"error":"internal_error","message":"Out of memory"}
-                , .{
-                    .status = .internal_server_error,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "application/json" },
-                        .{ .name = "access-control-allow-origin", .value = "*" },
-                    },
-                });
-                return;
-            } else null)
-        else
-            null;
-        // No errdefer needed for last allocation — if we get here, all allocs succeeded.
+        // Dupe all 4 strings at once — dupeProviderConfig has proper errdefer cleanup
+        // so if any allocation fails, all previously-allocated strings are freed.
+        const new_config = dupeProviderConfig(self.allocator, merged) catch {
+            try request.respond(
+                \\{"error":"internal_error","message":"Out of memory"}
+            , .{
+                .status = .internal_server_error,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
 
-        // Atomic swap under the mutex: swap all fields at once, then free old values outside.
+        // Atomic swap under the mutex: swap the whole struct, then free old values.
         {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
 
-            // Save old values for freeing after unlock
             const old_provider = self.active_provider;
+            self.active_provider = new_config;
 
-            // Swap in new values (keep old if field wasn't in request)
-            self.active_provider = ProviderConfig{
-                .provider = new_type orelse old_provider.provider,
-                .base_url = new_base_url orelse old_provider.base_url,
-                .api_key = new_api_key orelse old_provider.api_key,
-                .model = new_model orelse old_provider.model,
-            };
-
-            // Free old values for fields that were replaced
-            if (new_type != null) self.allocator.free(old_provider.provider);
-            if (new_base_url != null) self.allocator.free(old_provider.base_url);
-            if (new_api_key != null) self.allocator.free(old_provider.api_key);
-            if (new_model != null) self.allocator.free(old_provider.model);
+            // Free old heap-owned strings
+            freeProviderConfig(self.allocator, old_provider);
 
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
