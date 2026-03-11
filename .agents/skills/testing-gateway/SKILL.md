@@ -16,7 +16,7 @@ export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
 ## Build
 
 ```bash
-cd /home/ubuntu/repos/nullclaw
+cd <repo-root>  # e.g. /path/to/nullclaw
 zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
 ```
 
