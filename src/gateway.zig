@@ -295,9 +295,19 @@ pub const Gateway = struct {
         };
         defer freeProviderConfig(self.allocator, provider);
 
-        // Check if streaming is requested
-        const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
-            std.mem.indexOf(u8, body, "\"stream\": true") != null;
+        // Check if streaming is requested by parsing the JSON "stream" field properly.
+        // This avoids false positives from string values and false negatives from whitespace.
+        const is_stream = blk: {
+            const stream_parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch break :blk false;
+            defer stream_parsed.deinit();
+            const stream_root = stream_parsed.value;
+            if (stream_root == .object) {
+                if (stream_root.object.get("stream")) |sv| {
+                    if (sv == .bool) break :blk sv.bool;
+                }
+            }
+            break :blk false;
+        };
 
         std.log.info("Forwarding to {s} at {s} (stream={s})", .{
             provider.provider,
@@ -868,8 +878,10 @@ pub const Gateway = struct {
     fn checkBearerAuth(self: *Gateway, request: *std.http.Server.Request) !bool {
         const expected_key = self.getMasterKey() orelse return true; // No key configured = dev mode
 
-        // Find Authorization header
+        // Scan all headers. A valid Bearer token takes priority; if none is found,
+        // fall back to X-Master-Key (backwards compatibility).
         var provided_token: ?[]const u8 = null;
+        var master_key_fallback: ?[]const u8 = null;
         var it = request.iterateHeaders();
         while (it.next()) |header| {
             if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
@@ -877,15 +889,18 @@ pub const Gateway = struct {
                 // Expect "Bearer <token>"
                 if (val.len > 7 and std.mem.eql(u8, val[0..7], "Bearer ")) {
                     provided_token = val[7..];
-                    break;
+                    break; // Valid Bearer found — use it immediately
                 }
-                // Authorization header present but not Bearer — keep looking for X-Master-Key
-            } else if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
-                // Also accept X-Master-Key for backwards compatibility
-                provided_token = header.value;
-                break;
+                // Non-Bearer Authorization header — keep looking for X-Master-Key
+                continue;
+            }
+            // Also accept X-Master-Key for backwards compatibility
+            if (std.ascii.eqlIgnoreCase(header.name, "x-master-key")) {
+                master_key_fallback = header.value;
             }
         }
+        // Fall back to X-Master-Key if no valid Bearer token was found
+        if (provided_token == null) provided_token = master_key_fallback;
 
         const token = provided_token orelse {
             try request.respond(
@@ -1007,19 +1022,28 @@ pub const Gateway = struct {
             return;
         }
 
-        // Build the complete new provider config OUTSIDE the mutex.
-        // This ensures the update is atomic — either all fields update or none do.
-        // On OOM, we clean up all previously-allocated strings and return an error.
-        //
-        // We take a deep copy of the current provider under the mutex first, so
-        // we can safely read current values outside the lock without risk of
-        // use-after-free if another thread updates the provider concurrently.
-
-        // Take a deep copy of the current provider (thread-safe)
-        const current = blk: {
+        // Atomic merge+dupe+swap under a single mutex hold.
+        // We hold the lock for the entire sequence to prevent a TOCTOU race:
+        // without this, another thread could free the old strings between when
+        // we read current values and when we dupe them.
+        // Allocating under the lock is acceptable since config updates are infrequent.
+        {
             self.provider_mutex.lock();
             defer self.provider_mutex.unlock();
-            break :blk dupeProviderConfig(self.allocator, self.active_provider) catch {
+
+            // Build merged config: JSON values override current, fallback to active_provider.
+            // These slices are borrowed — safe because we hold the mutex.
+            const merged = ProviderConfig{
+                .provider = if (root.object.get("type")) |v| (if (v == .string) v.string else self.active_provider.provider) else self.active_provider.provider,
+                .base_url = if (root.object.get("base_url")) |v| (if (v == .string) v.string else self.active_provider.base_url) else self.active_provider.base_url,
+                .api_key = if (root.object.get("api_key")) |v| (if (v == .string) v.string else self.active_provider.api_key) else self.active_provider.api_key,
+                .model = if (root.object.get("model")) |v| (if (v == .string) v.string else self.active_provider.model) else self.active_provider.model,
+            };
+
+            // Dupe all 4 strings — dupeProviderConfig has proper errdefer chains
+            // so partial OOM cleans up already-allocated strings.
+            const new_config = dupeProviderConfig(self.allocator, merged) catch {
+                // The mutex unlocks via defer when we return from this block.
                 try request.respond(
                     \\{"error":"internal_error","message":"Out of memory"}
                 , .{
@@ -1031,42 +1055,10 @@ pub const Gateway = struct {
                 });
                 return;
             };
-        };
-        defer freeProviderConfig(self.allocator, current);
 
-        // Build merged config using JSON values or falling back to current values.
-        // These slices are borrowed (not owned) — we'll dupe everything in one shot below.
-        const merged = ProviderConfig{
-            .provider = if (root.object.get("type")) |v| (if (v == .string) v.string else current.provider) else current.provider,
-            .base_url = if (root.object.get("base_url")) |v| (if (v == .string) v.string else current.base_url) else current.base_url,
-            .api_key = if (root.object.get("api_key")) |v| (if (v == .string) v.string else current.api_key) else current.api_key,
-            .model = if (root.object.get("model")) |v| (if (v == .string) v.string else current.model) else current.model,
-        };
-
-        // Dupe all 4 strings at once — dupeProviderConfig has proper errdefer cleanup
-        // so if any allocation fails, all previously-allocated strings are freed.
-        const new_config = dupeProviderConfig(self.allocator, merged) catch {
-            try request.respond(
-                \\{"error":"internal_error","message":"Out of memory"}
-            , .{
-                .status = .internal_server_error,
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "application/json" },
-                    .{ .name = "access-control-allow-origin", .value = "*" },
-                },
-            });
-            return;
-        };
-
-        // Atomic swap under the mutex: swap the whole struct, then free old values.
-        {
-            self.provider_mutex.lock();
-            defer self.provider_mutex.unlock();
-
+            // Swap and free old values
             const old_provider = self.active_provider;
             self.active_provider = new_config;
-
-            // Free old heap-owned strings
             freeProviderConfig(self.allocator, old_provider);
 
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
