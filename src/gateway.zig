@@ -1028,8 +1028,7 @@ pub const Gateway = struct {
             // Dupe all 4 strings — dupeProviderConfig has proper errdefer chains
             // so partial OOM cleans up already-allocated strings.
             const new_config = dupeProviderConfig(self.allocator, merged) catch {
-                // Must unlock before responding (defer handles this)
-                // Note: we're inside the defer-unlock scope, so unlock happens automatically
+                // The mutex unlocks via defer when we return from this block.
                 try request.respond(
                     \\{"error":"internal_error","message":"Out of memory"}
                 , .{
