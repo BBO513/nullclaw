@@ -10,38 +10,29 @@ If Zig 0.14.1 is not installed:
 cd /tmp
 wget https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz
 tar xf zig-linux-x86_64-0.14.1.tar.xz
-export PATH="/tmp/zig-x86_64-linux-0.14.1:$PATH"
+export PATH="/tmp/zig-linux-x86_64-0.14.1:$PATH"
 ```
 
 ## Build
 
 ```bash
-cd <repo-root>  # e.g. /path/to/nullclaw
-zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl
+cd /home/ubuntu/repos/nullclaw
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
 ```
 
 Build output: `./zig-out/bin/nullclaw`
 
 ## Configuration
 
-Config file: `config.json` in the working directory. Schema defined in `src/config.zig`:
+Config file: `config.json` in the working directory. Schema defined in `src/config.zig`.
 
-```json
-{
-    "websocket_host": "127.0.0.1",
-    "websocket_port": 3000,
-    "http_host": "127.0.0.1",
-    "http_port": 3000,
-    "secret_store_path": "/var/lib/nullclaw/secrets.enc",
-    "sandbox_enabled": true,
-    "max_memory_bytes": 1048576,
-    "channels": [ ... ]
-}
-```
+Key fields for testing:
+- `master_key`: Set in config.json or via `NULLCLAW_MASTER_KEY` env var for auth testing
+- `provider.type`: `"ollama"` for local testing
+- `provider.base_url`: `"http://localhost:11434"` for Ollama
+- `provider.model`: Any model name (e.g. `"llama3.1"`)
 
-Fields: `websocket_host`, `websocket_port`, `http_host`, `http_port`, `secret_store_path`, `sandbox_enabled`, `max_memory_bytes`, and `channels` (array of `{ name, enabled, endpoint, auth_token_key }`).
-
-There is no `provider`, `master_key`, or `api_key` field in the committed config.
+If no `master_key` is configured (config + env), all endpoints are unprotected (dev mode).
 
 ## Running
 
@@ -49,77 +40,119 @@ There is no `provider`, `master_key`, or `api_key` field in the committed config
 ```bash
 ./zig-out/bin/nullclaw doctor
 ```
-Runs 7 check categories (`src/doctor.zig`): Configuration (3 checks), Network Endpoints (1 port-bind check + 3 INFO lines), Communication Channels (18 channel registrations), Secret Store / ChaCha20-Poly1305 (3 checks), Sandbox / Landlock (2 checks), and Resource Limits (1 check). Total pass count depends on Landlock availability and channel health but expect 27-28 with 0 failures on a typical system.
+Expect: 27-28 checks passed with 0 failures.
 
 ### Gateway server
 ```bash
 ./zig-out/bin/nullclaw serve
 ```
-Expect: `Gateway is ready. Listening...` on port 3000 (v0.1.0).
+Expect: "Gateway ready. Listening..." on port 3000 (v0.2.0).
+
+### Gateway server with auth enabled
+```bash
+NULLCLAW_MASTER_KEY=test-secret-123 ./zig-out/bin/nullclaw serve
+```
 
 ## Gateway Endpoints
 
-The gateway (`src/gateway.zig`) routes exactly 4 paths:
+The gateway (`src/gateway.zig`) routes these paths:
 
-### 1. `/ws` — WebSocket upgrade
-Upgrades to WebSocket. Text messages are published to the internal event bus and echoed back as `{"type":"agent_response","status":"acknowledged"}`. Binary messages are published as tool calls. Pings are answered with pongs.
-
-### 2. `POST /v1/chat/completions` — Chat completions (stub)
-Accepts POST only (returns 405 for other methods). Reads the request body, publishes it to the internal event bus as an `agent_thought`, and returns a **hardcoded stub response** — it does NOT proxy to Ollama or any LLM provider.
-
-```bash
-curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"any","messages":[{"role":"user","content":"hi"}]}'
-```
-
-Expected response:
-```json
-{"id":"chatcmpl-nullclaw-<timestamp>","object":"chat.completion","created":<timestamp>,"model":"nullclaw-nexus-v0.1","choices":[{"index":0,"message":{"role":"assistant","content":"NullClaw Nexus agent processing your request."},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
-```
-
-### 3. `GET /health` — Health check
+### 1. `GET /health` — Health check (NO auth required)
 ```bash
 curl -s http://127.0.0.1:3000/health
 ```
+Expected: `{"status":"healthy","service":"nullclaw-nexus","version":"0.2.0"}`
 
-Expected response:
-```json
-{"status":"healthy","service":"nullclaw-nexus","version":"0.1.0"}
+### 2. `GET /status` — Provider status (auth required)
+```bash
+curl -s -H "Authorization: Bearer test-secret-123" http://127.0.0.1:3000/status
+```
+Expected: JSON with `status`, `version`, `uptime_seconds`, `provider` object.
+
+### 3. `/config/provider` — Provider config GET/POST (auth required)
+```bash
+# GET current config
+curl -s -H "Authorization: Bearer test-secret-123" http://127.0.0.1:3000/config/provider
+
+# POST update config
+curl -s -X POST -H "Authorization: Bearer test-secret-123" -H "Content-Type: application/json" \
+  -d '{"model":"new-model"}' http://127.0.0.1:3000/config/provider
 ```
 
-### 4. Everything else — 404
+### 4. `POST /v1/chat/completions` — Chat completions (auth required)
+```bash
+curl -s -X POST -H "Authorization: Bearer test-secret-123" -H "Content-Type: application/json" \
+  -d '{"model":"llama3.1","messages":[{"role":"user","content":"hi"}]}' \
+  http://127.0.0.1:3000/v1/chat/completions
+```
+Note: Requires Ollama (or configured provider) running. If provider is down, expect a connection error JSON, NOT a crash.
+
+### 5. `/ws` — WebSocket (auth required)
+WebSocket upgrade endpoint. Requires auth when master key is configured.
+
+### 6. Everything else — 404
 ```bash
 curl -s http://127.0.0.1:3000/anything-else
 ```
+Expected: `{"error":"not_found","message":"Unknown endpoint"}`
 
-Expected response:
-```json
-{"error":"not_found","message":"Unknown endpoint"}
-```
+## Testing Auth (Bug 5)
 
-There is no `/status` endpoint, no `/config/provider` endpoint, no auth/X-Master-Key handling, and no SSE streaming.
+Start the gateway with `NULLCLAW_MASTER_KEY=test-secret-123` env var.
 
-## Stress Test
+| Test | Command | Expected |
+|------|---------|----------|
+| Health (no auth) | `curl -s http://127.0.0.1:3000/health` | 200 OK |
+| Protected without auth | `curl -s http://127.0.0.1:3000/status` | 401 Unauthorized |
+| Protected with wrong token | `curl -s -H "Authorization: Bearer wrong" http://127.0.0.1:3000/status` | 403 Forbidden |
+| Protected with correct Bearer | `curl -s -H "Authorization: Bearer test-secret-123" http://127.0.0.1:3000/status` | 200 OK |
+| X-Master-Key backward compat | `curl -s -H "X-Master-Key: test-secret-123" http://127.0.0.1:3000/status` | 200 OK |
+| POST without auth | `curl -s -X POST http://127.0.0.1:3000/config/provider -d '{}'` | 401 |
+| POST with auth | `curl -s -X POST -H "Authorization: Bearer test-secret-123" -H "Content-Type: application/json" -d '{"model":"test"}' http://127.0.0.1:3000/config/provider` | 200 |
 
-Fire parallel requests at the two functional endpoints to verify stability:
+**Known edge case (minor):** If a client sends both `Authorization: Basic xyz` (non-Bearer) AND `X-Master-Key: valid-key`, the `X-Master-Key` may not be reached because the loop breaks on the Authorization header. This only affects clients sending both headers simultaneously, which is unusual.
+
+## Testing Thread Safety (Bug 6 + TOCTOU)
+
+Run concurrent readers and writers against the gateway for 30+ seconds:
+
+**Terminal A (reader — 300 requests):**
 ```bash
-for i in $(seq 1 20); do curl -s http://127.0.0.1:3000/health > /dev/null 2>&1 & done
-for i in $(seq 1 5); do curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"test"}]}' > /dev/null 2>&1 & done
-wait
-echo "All requests completed"
-curl -s http://127.0.0.1:3000/health
+for i in $(seq 1 300); do
+  curl -s -H "Authorization: Bearer test-secret-123" http://127.0.0.1:3000/status > /dev/null 2>&1
+  sleep 0.1
+done
+echo "READER DONE"
 ```
-Expect: All requests complete without crashes, health returns valid JSON.
+
+**Terminal B (writer — 150 requests):**
+```bash
+for i in $(seq 1 150); do
+  curl -s -X POST -H "Authorization: Bearer test-secret-123" -H "Content-Type: application/json" \
+    -d "{\"model\":\"stress-$i\"}" http://127.0.0.1:3000/config/provider > /dev/null 2>&1
+  sleep 0.2
+done
+echo "WRITER DONE"
+```
+
+Expect: Both loops complete with exit code 0, no gateway crashes or errors.
+
+After stress test, verify:
+```bash
+curl -s http://127.0.0.1:3000/health  # Should return healthy
+curl -s -H "Authorization: Bearer test-secret-123" http://127.0.0.1:3000/status  # Should show last stress model
+```
 
 ## Common Issues
 
-- **Wrong Zig version**: If build fails with unfamiliar errors, check `zig version` — must be 0.14.x, not 0.16.0-dev
-- **Port in use**: If gateway fails to start, check if another instance is running on port 3000
+- **Wrong Zig version**: Build fails with unfamiliar errors. Check `zig version` — must be 0.14.x, not 0.16.0-dev
+- **Port in use**: Gateway fails to start. Kill any existing process on port 3000
 - **Config not found**: Gateway looks for `config.json` in the current working directory
+- **Auth issues in dev mode**: If no master_key is set, all endpoints are open (no auth check). Set `NULLCLAW_MASTER_KEY` env var for testing auth.
+- **Feature branches not on main**: PRs may merge into intermediate branches (not main directly). Check PR target branch. Use `git fetch origin && git checkout origin/<branch>` to test.
 
 ## Devin Secrets Needed
 
-None required. The gateway has no auth and no external provider dependencies.
+No secrets required for local testing. For cloud provider testing:
+- `OPENAI_API_KEY` — for OpenAI provider testing
+- `ANTHROPIC_API_KEY` — for Anthropic/Claude provider testing
