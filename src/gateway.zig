@@ -44,6 +44,125 @@ fn freeProviderConfig(allocator: std.mem.Allocator, p: ProviderConfig) void {
     allocator.free(p.model);
 }
 
+/// Read the default gateway IP from /proc/net/route (WSL host IP).
+/// Returns null if not on WSL or if parsing fails.
+fn getWslHostIp() ?[15]u8 {
+    const file = std.fs.cwd().openFile("/proc/net/route", .{}) catch return null;
+    defer file.close();
+
+    var buf: [4096]u8 = undefined;
+    const len = file.readAll(&buf) catch return null;
+    const content = buf[0..len];
+
+    // Skip header line
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    _ = lines.next(); // skip header
+
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeScalar(u8, line, '\t');
+        _ = fields.next(); // iface
+        const dest = fields.next() orelse continue;
+        const gateway = fields.next() orelse continue;
+
+        // Default route has destination 00000000
+        if (std.mem.eql(u8, dest, "00000000")) {
+            // Gateway is a hex-encoded little-endian IP
+            if (gateway.len == 8) {
+                const b0 = std.fmt.parseUnsigned(u8, gateway[6..8], 16) catch continue;
+                const b1 = std.fmt.parseUnsigned(u8, gateway[4..6], 16) catch continue;
+                const b2 = std.fmt.parseUnsigned(u8, gateway[2..4], 16) catch continue;
+                const b3 = std.fmt.parseUnsigned(u8, gateway[0..2], 16) catch continue;
+                var ip_buf: [15]u8 = undefined;
+                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ b0, b1, b2, b3 }) catch continue;
+                _ = ip_str;
+                return ip_buf;
+            }
+        }
+    }
+    return null;
+}
+
+/// Try to connect to an Ollama instance at the given URL by hitting /api/tags.
+/// Returns true if Ollama responds with HTTP 200 within a short timeout.
+fn probeOllamaAt(allocator: std.mem.Allocator, base_url: []const u8) bool {
+    var url_buf: [256]u8 = undefined;
+    const probe_url = std.fmt.bufPrint(&url_buf, "{s}/api/tags", .{base_url}) catch return false;
+
+    const uri = std.Uri.parse(probe_url) catch return false;
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    var server_header_buf: [4096]u8 = undefined;
+    var req = client.open(.GET, uri, .{
+        .server_header_buffer = &server_header_buf,
+    }) catch return false;
+    defer req.deinit();
+
+    req.send() catch return false;
+    req.finish() catch return false;
+    req.wait() catch return false;
+
+    return req.response.status == .ok;
+}
+
+/// Auto-discover Ollama URL. Tries configured URL first, then WSL host IP,
+/// then common fallback addresses. Returns the first working URL (heap-allocated)
+/// or null if none respond.
+fn discoverOllamaUrl(allocator: std.mem.Allocator, configured_url: []const u8) ?[]u8 {
+    const stdout = std.io.getStdOut().writer();
+
+    // 1. Try the configured URL first
+    stdout.print("  Auto-discovery: trying {s} ...\n", .{configured_url}) catch {};
+    if (probeOllamaAt(allocator, configured_url)) {
+        stdout.print("  Auto-discovery: found Ollama at {s}\n", .{configured_url}) catch {};
+        return allocator.dupe(u8, configured_url) catch return null;
+    }
+
+    // 2. Try WSL host IP (Windows host from inside WSL)
+    if (getWslHostIp()) |ip_buf| {
+        // Find actual length of IP string
+        var ip_len: usize = 0;
+        for (ip_buf, 0..) |c, i| {
+            if (c == 0 or (c != '.' and (c < '0' or c > '9'))) {
+                ip_len = i;
+                break;
+            }
+        }
+        if (ip_len == 0) ip_len = ip_buf.len;
+        const ip = ip_buf[0..ip_len];
+
+        var wsl_url_buf: [64]u8 = undefined;
+        const wsl_url = std.fmt.bufPrint(&wsl_url_buf, "http://{s}:11434", .{ip}) catch null;
+        if (wsl_url) |url| {
+            stdout.print("  Auto-discovery: trying {s} (WSL host) ...\n", .{url}) catch {};
+            if (probeOllamaAt(allocator, url)) {
+                stdout.print("  Auto-discovery: found Ollama at {s}\n", .{url}) catch {};
+                return allocator.dupe(u8, url) catch return null;
+            }
+        }
+    }
+
+    // 3. Try common fallback addresses
+    const fallbacks = [_][]const u8{
+        "http://127.0.0.1:11434",
+        "http://host.docker.internal:11434",
+    };
+    for (fallbacks) |url| {
+        // Skip if same as configured
+        if (std.mem.eql(u8, url, configured_url)) continue;
+        stdout.print("  Auto-discovery: trying {s} ...\n", .{url}) catch {};
+        if (probeOllamaAt(allocator, url)) {
+            stdout.print("  Auto-discovery: found Ollama at {s}\n", .{url}) catch {};
+            return allocator.dupe(u8, url) catch return null;
+        }
+    }
+
+    stdout.print("  Auto-discovery: no Ollama instance found\n", .{}) catch {};
+    return null;
+}
+
 /// Gateway is the main HTTP + WebSocket server for NullClaw.
 /// Routes /v1/chat/completions to configured LLM provider (Ollama, OpenAI, Anthropic, etc.)
 pub const Gateway = struct {
@@ -61,8 +180,18 @@ pub const Gateway = struct {
         // and can be safely freed on update or deinit.
         const owned_provider_type = try allocator.dupe(u8, config.provider.provider);
         errdefer allocator.free(owned_provider_type);
-        const owned_base_url = try allocator.dupe(u8, config.provider.base_url);
+
+        // For Ollama provider, run auto-discovery to find a working URL
+        const owned_base_url = blk: {
+            if (std.mem.eql(u8, config.provider.provider, "ollama")) {
+                if (discoverOllamaUrl(allocator, config.provider.base_url)) |discovered| {
+                    break :blk discovered;
+                }
+            }
+            break :blk try allocator.dupe(u8, config.provider.base_url);
+        };
         errdefer allocator.free(owned_base_url);
+
         const owned_api_key = try allocator.dupe(u8, config.provider.api_key);
         errdefer allocator.free(owned_api_key);
         const owned_model = try allocator.dupe(u8, config.provider.model);
@@ -117,8 +246,8 @@ pub const Gateway = struct {
             self.config.websocket_host, self.config.websocket_port,
             self.config.http_host, self.config.http_port,
             self.config.http_host, self.config.http_port,
-            self.config.provider.provider, self.config.provider.base_url,
-            self.config.provider.model,
+            self.active_provider.provider, self.active_provider.base_url,
+            self.active_provider.model,
         });
 
         self.acceptLoop();
@@ -1058,6 +1187,16 @@ pub const Gateway = struct {
             const old_provider = self.active_provider;
             self.active_provider = new_config;
             freeProviderConfig(self.allocator, old_provider);
+
+            // Run auto-discovery for Ollama provider
+            if (std.mem.eql(u8, self.active_provider.provider, "ollama")) {
+                if (discoverOllamaUrl(self.allocator, self.active_provider.base_url)) |discovered| {
+                    // Replace the base_url with discovered URL
+                    const old_url = self.active_provider.base_url;
+                    self.active_provider.base_url = discovered;
+                    self.allocator.free(old_url);
+                }
+            }
 
             std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
