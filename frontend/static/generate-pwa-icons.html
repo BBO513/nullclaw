@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generate PWA Icons</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #0a0a0f;
+      color: #fff;
+    }
+    h1 { color: #7c3aed; }
+    button {
+      background: linear-gradient(135deg, #7c3aed, #00f0ff);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px 5px;
+    }
+    button:hover { opacity: 0.9; }
+    .preview {
+      display: flex;
+      gap: 20px;
+      margin: 20px 0;
+      flex-wrap: wrap;
+    }
+    .icon-preview {
+      text-align: center;
+    }
+    canvas {
+      border: 2px solid #7c3aed;
+      border-radius: 8px;
+      background: white;
+    }
+    .success {
+      background: #10b981;
+      padding: 10px;
+      border-radius: 8px;
+      margin: 10px 0;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎨 NullClaw Nexus - PWA Icon Generator</h1>
+  <p>Generate PNG icons from the SVG icon for PWA installation.</p>
+  
+  <button onclick="generateIcons()">Generate All Icons</button>
+  <button onclick="downloadAll()">Download All</button>
+  
+  <div class="success" id="success">✅ Icons generated! Click "Download All" to save them.</div>
+  
+  <div class="preview" id="preview"></div>
+
+  <script>
+    const sizes = [192, 512];
+    const canvases = {};
+
+    async function generateIcons() {
+      const preview = document.getElementById('preview');
+      preview.innerHTML = '';
+
+      // Load SVG
+      const response = await fetch('icon.svg');
+      const svgText = await response.text();
+      const blob = new Blob([svgText], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+
+      for (const size of sizes) {
+        const container = document.createElement('div');
+        container.className = 'icon-preview';
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        canvases[size] = canvas;
+        
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+        
+        await new Promise((resolve) => {
+          img.onload = () => {
+            ctx.drawImage(img, 0, 0, size, size);
+            resolve();
+          };
+          img.src = url;
+        });
+
+        const label = document.createElement('div');
+        label.textContent = `${size}x${size}`;
+        label.style.marginTop = '10px';
+        
+        container.appendChild(canvas);
+        container.appendChild(label);
+        preview.appendChild(container);
+      }
+
+      URL.revokeObjectURL(url);
+      document.getElementById('success').style.display = 'block';
+    }
+
+    function downloadAll() {
+      for (const [size, canvas] of Object.entries(canvases)) {
+        canvas.toBlob((blob) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `icon-${size}.png`;
+          a.click();
+          URL.revokeObjectURL(url);
+        });
+      }
+    }
+
+    // Auto-generate on load
+    window.addEventListener('load', generateIcons);
+  </script>
+</body>
+</html>

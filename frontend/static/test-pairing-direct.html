@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Direct Pairing Test</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #fff;
+        }
+        .container {
+            background: #1a1a1a;
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid #333;
+        }
+        h1 { margin-top: 0; }
+        input, button {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 1px solid #444;
+            background: #2a2a2a;
+            color: #fff;
+            font-size: 16px;
+        }
+        button {
+            background: #6366f1;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #7c3aed; }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            background: #2a2a2a;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .success { border-left: 4px solid #10b981; }
+        .error { border-left: 4px solid #ef4444; }
+        .info { border-left: 4px solid #3b82f6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Gateway Pairing Test</h1>
+        <p>Test the persistent token pairing system</p>
+        
+        <label>Gateway URL:</label>
+        <input type="text" id="gatewayUrl" value="http://127.0.0.1:3001" placeholder="http://127.0.0.1:3001">
+        
+        <label>Pairing Code (from terminal):</label>
+        <input type="text" id="pairingCode" value="111912" placeholder="Enter 6-digit code">
+        
+        <button onclick="testPair()">Pair with Gateway</button>
+        <button onclick="testWithToken()">Test Existing Token</button>
+        <button onclick="checkLocalStorage()">Check Stored Token</button>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        function showResult(message, type = 'info') {
+            const result = document.getElementById('result');
+            result.className = `result ${type}`;
+            result.textContent = message;
+        }
+
+        async function testPair() {
+            const gatewayUrl = document.getElementById('gatewayUrl').value;
+            const pairingCode = document.getElementById('pairingCode').value;
+            
+            if (!pairingCode || pairingCode.length !== 6) {
+                showResult('Please enter a 6-digit pairing code', 'error');
+                return;
+            }
+            
+            showResult('Attempting to pair...', 'info');
+            
+            try {
+                const response = await fetch(`${gatewayUrl}/pair`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Pairing-Code': pairingCode
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.token) {
+                    // Save token to localStorage
+                    localStorage.setItem('gateway_bearer_token', data.token);
+                    localStorage.setItem('gateway_paired', 'true');
+                    
+                    showResult(
+                        `✅ SUCCESS!\n\n` +
+                        `Status: ${data.status}\n` +
+                        `Token: ${data.token}\n\n` +
+                        `Token saved to localStorage!\n` +
+                        `Gateway also saved it to nullclaw.token file.\n\n` +
+                        `Now try "Test Existing Token" to verify it works.`,
+                        'success'
+                    );
+                } else {
+                    showResult(
+                        `❌ PAIRING FAILED\n\n` +
+                        `Status: ${response.status} ${response.statusText}\n` +
+                        `Response: ${JSON.stringify(data, null, 2)}`,
+                        'error'
+                    );
+                }
+            } catch (error) {
+                showResult(
+                    `❌ ERROR\n\n` +
+                    `${error.message}\n\n` +
+                    `Make sure:\n` +
+                    `1. Gateway is running on port 3000\n` +
+                    `2. CORS proxy is running on port 3001\n` +
+                    `3. Pairing code is correct`,
+                    'error'
+                );
+            }
+        }
+
+        async function testWithToken() {
+            const gatewayUrl = document.getElementById('gatewayUrl').value;
+            const token = localStorage.getItem('gateway_bearer_token');
+            
+            if (!token) {
+                showResult('No token found in localStorage. Pair first!', 'error');
+                return;
+            }
+            
+            showResult('Testing with stored token...', 'info');
+            
+            try {
+                const response = await fetch(`${gatewayUrl}/webhook`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: 'Test message from pairing test page'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(
+                        `✅ TOKEN WORKS!\n\n` +
+                        `Status: ${response.status}\n` +
+                        `Response: ${JSON.stringify(data, null, 2)}\n\n` +
+                        `Your token is valid and working!`,
+                        'success'
+                    );
+                } else {
+                    showResult(
+                        `❌ TOKEN INVALID\n\n` +
+                        `Status: ${response.status} ${response.statusText}\n` +
+                        `Response: ${JSON.stringify(data, null, 2)}\n\n` +
+                        `You may need to pair again.`,
+                        'error'
+                    );
+                }
+            } catch (error) {
+                showResult(`❌ ERROR: ${error.message}`, 'error');
+            }
+        }
+
+        function checkLocalStorage() {
+            const token = localStorage.getItem('gateway_bearer_token');
+            const paired = localStorage.getItem('gateway_paired');
+            
+            if (token) {
+                showResult(
+                    `📦 LOCALSTORAGE STATUS\n\n` +
+                    `Paired: ${paired}\n` +
+                    `Token: ${token}\n\n` +
+                    `Token length: ${token.length} chars\n` +
+                    `Token prefix: ${token.substring(0, 10)}...`,
+                    'info'
+                );
+            } else {
+                showResult(
+                    `📦 LOCALSTORAGE STATUS\n\n` +
+                    `No token found.\n` +
+                    `You need to pair first.`,
+                    'info'
+                );
+            }
+        }
+        
+        // Auto-check on load
+        window.addEventListener('load', () => {
+            const token = localStorage.getItem('gateway_bearer_token');
+            if (token) {
+                showResult(`Found existing token in localStorage. Click "Test Existing Token" to verify.`, 'info');
+            }
+        });
+    </script>
+</body>
+</html>

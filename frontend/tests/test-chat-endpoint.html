@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Chat Completions Endpoint</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #0a0a0a;
+      color: #e0e0e0;
+    }
+    h1 { color: #00d4ff; }
+    .section {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin: 10px 0;
+      font-family: monospace;
+    }
+    .success { background: #1a4d2e; color: #4ade80; }
+    .error { background: #4d1a1a; color: #f87171; }
+    .info { background: #1a3a4d; color: #60a5fa; }
+    button {
+      background: #00d4ff;
+      color: #000;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      margin: 5px;
+    }
+    button:hover { background: #00b8e6; }
+    button:disabled {
+      background: #333;
+      color: #666;
+      cursor: not-allowed;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-family: monospace;
+      margin: 10px 0;
+    }
+    pre {
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 15px;
+      overflow-x: auto;
+      font-size: 12px;
+    }
+    label {
+      display: block;
+      margin: 10px 0 5px 0;
+      font-weight: bold;
+      color: #00d4ff;
+    }
+  </style>
+</head>
+<body>
+  <h1>🧪 Test /v1/chat/completions Endpoint</h1>
+
+  <div class="section">
+    <h2>Configuration</h2>
+    <label>Gateway URL (CORS Proxy)</label>
+    <input type="text" id="gatewayUrl" value="http://127.0.0.1:3001" />
+    
+    <label>Bearer Token</label>
+    <input type="text" id="bearerToken" placeholder="Paste your token here or use master key" />
+    
+    <button onclick="useMasterKey()">Use Master Key</button>
+    <button onclick="loadFromLocalStorage()">Load from localStorage</button>
+  </div>
+
+  <div class="section">
+    <h2>Tests</h2>
+    <button onclick="testHealth()">1. Test Health</button>
+    <button onclick="testChatCompletions()">2. Test Chat Completions</button>
+    <button onclick="testWithMessage()">3. Test Custom Message</button>
+    <button onclick="runAllTests()">Run All Tests</button>
+  </div>
+
+  <div class="section">
+    <h2>Custom Message Test</h2>
+    <label>Message</label>
+    <input type="text" id="customMessage" value="Say hello in one sentence" />
+    <label>Model</label>
+    <input type="text" id="modelName" value="llama3.1" />
+  </div>
+
+  <div class="section">
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+
+  <script>
+    function log(message, type = 'info') {
+      const results = document.getElementById('results');
+      const div = document.createElement('div');
+      div.className = `status ${type}`;
+      div.textContent = message;
+      results.appendChild(div);
+      results.scrollTop = results.scrollHeight;
+    }
+
+    function logJson(label, data) {
+      const results = document.getElementById('results');
+      const div = document.createElement('div');
+      div.innerHTML = `<strong>${label}:</strong><pre>${JSON.stringify(data, null, 2)}</pre>`;
+      results.appendChild(div);
+      results.scrollTop = results.scrollHeight;
+    }
+
+    function clearResults() {
+      document.getElementById('results').innerHTML = '';
+    }
+
+    function useMasterKey() {
+      document.getElementById('bearerToken').value = 'NULLCLAW-CREATOR-UNLIMITED';
+      log('✅ Master key loaded', 'success');
+    }
+
+    function loadFromLocalStorage() {
+      try {
+        const config = JSON.parse(localStorage.getItem('gatewayConfig') || '{}');
+        if (config.bearerToken) {
+          document.getElementById('bearerToken').value = config.bearerToken;
+          log('✅ Token loaded from localStorage', 'success');
+        } else {
+          log('❌ No token found in localStorage', 'error');
+        }
+        if (config.url) {
+          document.getElementById('gatewayUrl').value = config.url;
+        }
+      } catch (e) {
+        log('❌ Failed to load from localStorage: ' + e.message, 'error');
+      }
+    }
+
+    async function testHealth() {
+      clearResults();
+      log('Testing health endpoint...', 'info');
+      
+      const url = document.getElementById('gatewayUrl').value;
+      
+      try {
+        const response = await fetch(`${url}/health`);
+        const status = response.status;
+        
+        if (response.ok) {
+          log(`✅ Health check passed (HTTP ${status})`, 'success');
+          const text = await response.text();
+          if (text) {
+            logJson('Response', text);
+          }
+        } else {
+          log(`❌ Health check failed (HTTP ${status})`, 'error');
+        }
+      } catch (e) {
+        log(`❌ Health check error: ${e.message}`, 'error');
+        log('Make sure CORS proxy is running on port 3001', 'error');
+      }
+    }
+
+    async function testChatCompletions() {
+      log('Testing /v1/chat/completions endpoint...', 'info');
+      
+      const url = document.getElementById('gatewayUrl').value;
+      const token = document.getElementById('bearerToken').value;
+      
+      if (!token) {
+        log('❌ Please enter a bearer token', 'error');
+        return;
+      }
+
+      const payload = {
+        model: 'llama3.1',
+        messages: [
+          { role: 'user', content: 'Say hello in one sentence' }
+        ]
+      };
+
+      logJson('Request payload', payload);
+
+      try {
+        const response = await fetch(`${url}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const status = response.status;
+        log(`Response status: ${status}`, status === 200 ? 'success' : 'error');
+
+        if (response.ok) {
+          const data = await response.json();
+          logJson('Response data', data);
+          
+          if (data.choices && data.choices[0] && data.choices[0].message) {
+            log(`✅ AI Reply: ${data.choices[0].message.content}`, 'success');
+          }
+        } else {
+          const text = await response.text();
+          log(`❌ Error response: ${text}`, 'error');
+        }
+      } catch (e) {
+        log(`❌ Request error: ${e.message}`, 'error');
+      }
+    }
+
+    async function testWithMessage() {
+      log('Testing with custom message...', 'info');
+      
+      const url = document.getElementById('gatewayUrl').value;
+      const token = document.getElementById('bearerToken').value;
+      const message = document.getElementById('customMessage').value;
+      const model = document.getElementById('modelName').value;
+      
+      if (!token) {
+        log('❌ Please enter a bearer token', 'error');
+        return;
+      }
+
+      const payload = {
+        model: model,
+        messages: [
+          { role: 'user', content: message }
+        ]
+      };
+
+      logJson('Request payload', payload);
+
+      try {
+        const response = await fetch(`${url}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const status = response.status;
+        log(`Response status: ${status}`, status === 200 ? 'success' : 'error');
+
+        if (response.ok) {
+          const data = await response.json();
+          logJson('Response data', data);
+          
+          if (data.choices && data.choices[0] && data.choices[0].message) {
+            log(`✅ AI Reply: ${data.choices[0].message.content}`, 'success');
+          }
+        } else {
+          const text = await response.text();
+          log(`❌ Error response: ${text}`, 'error');
+        }
+      } catch (e) {
+        log(`❌ Request error: ${e.message}`, 'error');
+      }
+    }
+
+    async function runAllTests() {
+      clearResults();
+      await testHealth();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await testChatCompletions();
+    }
+
+    // Auto-load on page load
+    window.addEventListener('load', () => {
+      loadFromLocalStorage();
+    });
+  </script>
+</body>
+</html>

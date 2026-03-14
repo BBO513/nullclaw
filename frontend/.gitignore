@@ -1,0 +1,19 @@
+﻿node_modules/
+.svelte-kit/
+.zig-cache/
+zig-out/
+build/
+zig-0.13.0/
+zig-linux-x86_64-0.13.0.tar.xz
+zig-x86_64-linux-0.16.0-dev.2682+02142a54d.tar.xz
+nullclaw.db
+nullclaw.token
+nullclaw.exe
+nullclaw
+gateway.log
+gateway_restart.log
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/nullclaw*
+!src-tauri/binaries/.gitkeep

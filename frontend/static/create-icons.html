@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate NullClaw Icons</title>
+  <style>
+    body {
+      font-family: system-ui;
+      padding: 20px;
+      background: #0a0a0f;
+      color: #e0e0ff;
+    }
+    canvas {
+      border: 2px solid #7c3aed;
+      margin: 10px;
+    }
+    button {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px;
+    }
+    button:hover {
+      background: #9333ea;
+    }
+    .success {
+      color: #22c55e;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>NullClaw Icon Generator</h1>
+  <p>Click the buttons below to generate and download proper PWA icons:</p>
+  
+  <div>
+    <canvas id="canvas192" width="192" height="192"></canvas>
+    <canvas id="canvas512" width="512" height="512"></canvas>
+  </div>
+  
+  <div>
+    <button onclick="generateIcon(192)">Generate 192x192</button>
+    <button onclick="generateIcon(512)">Generate 512x512</button>
+    <button onclick="generateBoth()">Generate Both</button>
+  </div>
+  
+  <div id="status"></div>
+
+  <script>
+    function drawIcon(canvas, size) {
+      const ctx = canvas.getContext('2d');
+      
+      // Background - indigo gradient
+      const gradient = ctx.createLinearGradient(0, 0, size, size);
+      gradient.addColorStop(0, '#7c3aed');
+      gradient.addColorStop(1, '#5b21b6');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, size, size);
+      
+      // Draw "N" letter
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${size * 0.6}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('N', size / 2, size / 2);
+      
+      // Add subtle border
+      ctx.strokeStyle = '#9333ea';
+      ctx.lineWidth = size * 0.02;
+      ctx.strokeRect(0, 0, size, size);
+    }
+
+    function generateIcon(size) {
+      const canvas = document.getElementById(`canvas${size}`);
+      drawIcon(canvas, size);
+      
+      // Convert to blob and download
+      canvas.toBlob(function(blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `icon-${size}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        document.getElementById('status').innerHTML += 
+          `<div class="success">✅ Downloaded icon-${size}.png</div>`;
+      }, 'image/png');
+    }
+
+    function generateBoth() {
+      generateIcon(192);
+      setTimeout(() => generateIcon(512), 500);
+    }
+
+    // Draw previews on load
+    window.onload = function() {
+      drawIcon(document.getElementById('canvas192'), 192);
+      drawIcon(document.getElementById('canvas512'), 512);
+    };
+  </script>
+</body>
+</html>
