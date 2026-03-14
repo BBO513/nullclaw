@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Activate Master Key - NullClaw Nexus</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 600px;
+      margin: 100px auto;
+      padding: 40px;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      text-align: center;
+    }
+    h1 { color: #7c3aed; margin-bottom: 30px; }
+    button {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 15px 40px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: bold;
+      margin: 10px;
+    }
+    button:hover { background: #6d28d9; }
+    .success { color: #10b981; font-size: 24px; margin: 20px 0; }
+    .info { color: #60a5fa; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <h1>👑 Activate Master Key</h1>
+  <p class="info">Click the button below to activate your creator master key</p>
+  
+  <button onclick="activateMasterKey()">Activate NULLCLAW-CREATOR-UNLIMITED</button>
+  
+  <div id="result"></div>
+
+  <script>
+    function activateMasterKey() {
+      const license = {
+        key: 'NULLCLAW-CREATOR-UNLIMITED',
+        valid: true,
+        tier: 'pro',
+        activatedAt: new Date().toISOString()
+      };
+      
+      localStorage.setItem('license', JSON.stringify(license));
+      
+      const result = document.getElementById('result');
+      result.innerHTML = '<div class="success">✅ Master key activated!</div><p>Close this tab and reload the main app</p>';
+      
+      console.log('Master key activated:', license);
+    }
+  </script>
+</body>
+</html>

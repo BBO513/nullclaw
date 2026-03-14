@@ -1,0 +1,3 @@
+@echo off
+echo Starting NullClaw Nexus...
+npm run dev -- --open

@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NullClaw Nexus - Full Debug</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Courier New', monospace;
+      background: #0a0a0f;
+      color: #00ff88;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #7c3aed;
+      margin-bottom: 20px;
+      font-size: 24px;
+    }
+    .section {
+      background: #1a1a2e;
+      border: 2px solid #7c3aed;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .section h2 {
+      color: #00ff88;
+      margin-bottom: 15px;
+      font-size: 18px;
+    }
+    .log-entry {
+      padding: 10px;
+      margin: 5px 0;
+      border-left: 3px solid #7c3aed;
+      background: #0f0f1a;
+      font-size: 12px;
+      word-wrap: break-word;
+    }
+    .error {
+      border-left-color: #ff4444;
+      color: #ff4444;
+    }
+    .warn {
+      border-left-color: #ffaa00;
+      color: #ffaa00;
+    }
+    .info {
+      border-left-color: #00aaff;
+      color: #00aaff;
+    }
+    .success {
+      border-left-color: #00ff88;
+      color: #00ff88;
+    }
+    .timestamp {
+      color: #666;
+      font-size: 10px;
+      margin-right: 10px;
+    }
+    button {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin: 5px;
+      font-size: 14px;
+    }
+    button:hover {
+      background: #9333ea;
+    }
+    .controls {
+      margin-bottom: 20px;
+    }
+    iframe {
+      width: 100%;
+      height: 600px;
+      border: 2px solid #7c3aed;
+      border-radius: 8px;
+      background: white;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .stat {
+      background: #1a1a2e;
+      border: 2px solid #7c3aed;
+      border-radius: 8px;
+      padding: 15px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 32px;
+      font-weight: bold;
+      color: #7c3aed;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #888;
+      margin-top: 5px;
+    }
+    pre {
+      background: #0f0f1a;
+      padding: 10px;
+      border-radius: 5px;
+      overflow-x: auto;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 NullClaw Nexus - Full Debug Console</h1>
+    
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="errorCount">0</div>
+        <div class="stat-label">Errors</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="warnCount">0</div>
+        <div class="stat-label">Warnings</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="logCount">0</div>
+        <div class="stat-label">Logs</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="networkCount">0</div>
+        <div class="stat-label">Network Requests</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button onclick="clearLogs()">Clear Logs</button>
+      <button onclick="reloadIframe()">Reload App</button>
+      <button onclick="testDashboard()">Test Dashboard</button>
+      <button onclick="testChat()">Test Chat</button>
+      <button onclick="testMemory()">Test Memory</button>
+      <button onclick="testSwarm()">Test Swarm</button>
+      <button onclick="testSettings()">Test Settings</button>
+      <button onclick="exportLogs()">Export Logs</button>
+    </div>
+
+    <div class="section">
+      <h2>📱 Application Frame</h2>
+      <iframe id="appFrame" src="http://localhost:5173/"></iframe>
+    </div>
+
+    <div class="section">
+      <h2>🚨 Console Logs</h2>
+      <div id="consoleLogs"></div>
+    </div>
+
+    <div class="section">
+      <h2>🌐 Network Activity</h2>
+      <div id="networkLogs"></div>
+    </div>
+
+    <div class="section">
+      <h2>📊 Performance Metrics</h2>
+      <div id="performanceLogs"></div>
+    </div>
+  </div>
+
+  <script>
+    let errorCount = 0;
+    let warnCount = 0;
+    let logCount = 0;
+    let networkCount = 0;
+    let allLogs = [];
+
+    function timestamp() {
+      const now = new Date();
+      return now.toLocaleTimeString() + '.' + now.getMilliseconds().toString().padStart(3, '0');
+    }
+
+    function addLog(type, message, details = null) {
+      const logEntry = {
+        type,
+        message,
+        details,
+        timestamp: timestamp(),
+        time: Date.now()
+      };
+      allLogs.push(logEntry);
+
+      const container = document.getElementById('consoleLogs');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      
+      let content = `<span class="timestamp">[${logEntry.timestamp}]</span> ${message}`;
+      if (details) {
+        content += `<pre>${JSON.stringify(details, null, 2)}</pre>`;
+      }
+      entry.innerHTML = content;
+      
+      container.insertBefore(entry, container.firstChild);
+
+      // Update counters
+      if (type === 'error') {
+        errorCount++;
+        document.getElementById('errorCount').textContent = errorCount;
+      } else if (type === 'warn') {
+        warnCount++;
+        document.getElementById('warnCount').textContent = warnCount;
+      } else {
+        logCount++;
+        document.getElementById('logCount').textContent = logCount;
+      }
+
+      // Keep only last 100 entries in DOM
+      while (container.children.length > 100) {
+        container.removeChild(container.lastChild);
+      }
+    }
+
+    function addNetworkLog(method, url, status, duration) {
+      networkCount++;
+      document.getElementById('networkCount').textContent = networkCount;
+
+      const container = document.getElementById('networkLogs');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${status >= 400 ? 'error' : status >= 300 ? 'warn' : 'success'}`;
+      entry.innerHTML = `
+        <span class="timestamp">[${timestamp()}]</span>
+        <strong>${method}</strong> ${url} → ${status} (${duration}ms)
+      `;
+      container.insertBefore(entry, container.firstChild);
+
+      while (container.children.length > 50) {
+        container.removeChild(container.lastChild);
+      }
+    }
+
+    // Intercept console methods
+    const originalConsole = {
+      log: console.log,
+      error: console.error,
+      warn: console.warn,
+      info: console.info
+    };
+
+    console.log = function(...args) {
+      originalConsole.log.apply(console, args);
+      addLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    };
+
+    console.error = function(...args) {
+      originalConsole.error.apply(console, args);
+      addLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    };
+
+    console.warn = function(...args) {
+      originalConsole.warn.apply(console, args);
+      addLog('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    };
+
+    console.info = function(...args) {
+      originalConsole.info.apply(console, args);
+      addLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    };
+
+    // Capture global errors
+    window.addEventListener('error', (event) => {
+      addLog('error', `Global Error: ${event.message}`, {
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        error: event.error ? event.error.stack : null
+      });
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      addLog('error', `Unhandled Promise Rejection: ${event.reason}`, {
+        promise: event.promise,
+        reason: event.reason
+      });
+    });
+
+    // Monitor iframe
+    const iframe = document.getElementById('appFrame');
+    
+    iframe.addEventListener('load', () => {
+      addLog('success', 'Application loaded successfully');
+      
+      try {
+        const iframeWindow = iframe.contentWindow;
+        const iframeDocument = iframe.contentDocument;
+
+        // Intercept iframe console
+        if (iframeWindow.console) {
+          const iframeConsole = iframeWindow.console;
+          
+          iframeWindow.console.log = function(...args) {
+            originalConsole.log.apply(console, args);
+            addLog('info', '[APP] ' + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+          };
+
+          iframeWindow.console.error = function(...args) {
+            originalConsole.error.apply(console, args);
+            addLog('error', '[APP] ' + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+          };
+
+          iframeWindow.console.warn = function(...args) {
+            originalConsole.warn.apply(console, args);
+            addLog('warn', '[APP] ' + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+          };
+        }
+
+        // Capture iframe errors
+        iframeWindow.addEventListener('error', (event) => {
+          addLog('error', `[APP] Error: ${event.message}`, {
+            filename: event.filename,
+            lineno: event.lineno,
+            colno: event.colno
+          });
+        });
+
+        iframeWindow.addEventListener('unhandledrejection', (event) => {
+          addLog('error', `[APP] Unhandled Rejection: ${event.reason}`);
+        });
+
+        // Monitor performance
+        setTimeout(() => {
+          const perfData = iframeWindow.performance.getEntriesByType('navigation')[0];
+          if (perfData) {
+            const perfContainer = document.getElementById('performanceLogs');
+            perfContainer.innerHTML = `
+              <pre>
+DOM Content Loaded: ${Math.round(perfData.domContentLoadedEventEnd - perfData.fetchStart)}ms
+Load Complete: ${Math.round(perfData.loadEventEnd - perfData.fetchStart)}ms
+DOM Interactive: ${Math.round(perfData.domInteractive - perfData.fetchStart)}ms
+              </pre>
+            `;
+          }
+        }, 1000);
+
+      } catch (e) {
+        addLog('warn', 'Cannot access iframe content (CORS restriction)', { error: e.message });
+      }
+    });
+
+    iframe.addEventListener('error', () => {
+      addLog('error', 'Failed to load application');
+    });
+
+    // Monitor network requests (using Performance API)
+    setInterval(() => {
+      try {
+        const iframeWindow = iframe.contentWindow;
+        if (iframeWindow && iframeWindow.performance) {
+          const resources = iframeWindow.performance.getEntriesByType('resource');
+          resources.forEach(resource => {
+            if (!resource.logged) {
+              resource.logged = true;
+              const duration = Math.round(resource.duration);
+              addNetworkLog('GET', resource.name, 200, duration);
+            }
+          });
+        }
+      } catch (e) {
+        // CORS restriction
+      }
+    }, 1000);
+
+    function clearLogs() {
+      document.getElementById('consoleLogs').innerHTML = '';
+      document.getElementById('networkLogs').innerHTML = '';
+      errorCount = 0;
+      warnCount = 0;
+      logCount = 0;
+      networkCount = 0;
+      allLogs = [];
+      document.getElementById('errorCount').textContent = '0';
+      document.getElementById('warnCount').textContent = '0';
+      document.getElementById('logCount').textContent = '0';
+      document.getElementById('networkCount').textContent = '0';
+      addLog('info', 'Logs cleared');
+    }
+
+    function reloadIframe() {
+      addLog('info', 'Reloading application...');
+      iframe.src = iframe.src;
+    }
+
+    function testDashboard() {
+      addLog('info', 'Testing Dashboard...');
+      iframe.src = 'http://localhost:5173/';
+    }
+
+    function testChat() {
+      addLog('info', 'Testing Chat page...');
+      iframe.src = 'http://localhost:5173/chat';
+    }
+
+    function testMemory() {
+      addLog('info', 'Testing Memory page...');
+      iframe.src = 'http://localhost:5173/memory';
+    }
+
+    function testSwarm() {
+      addLog('info', 'Testing Swarm page...');
+      iframe.src = 'http://localhost:5173/swarm';
+    }
+
+    function testSettings() {
+      addLog('info', 'Testing Settings page...');
+      iframe.src = 'http://localhost:5173/settings';
+    }
+
+    function exportLogs() {
+      const data = JSON.stringify(allLogs, null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nullclaw-debug-${Date.now()}.json`;
+      a.click();
+      addLog('success', 'Logs exported');
+    }
+
+    // Initial log
+    addLog('success', 'Debug console initialized');
+    addLog('info', 'Loading application at http://localhost:5173/');
+  </script>
+</body>
+</html>

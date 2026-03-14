@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Quick Page Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #0a0a0f;
+      color: #e0e0ff;
+      padding: 20px;
+    }
+    .test { margin: 10px 0; padding: 10px; border-radius: 4px; }
+    .pass { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
+    .fail { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+    .pending { background: rgba(156, 163, 175, 0.2); color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <h1>🧪 Page Load Test</h1>
+  <div id="results"></div>
+  
+  <script>
+    const pages = [
+      { name: 'Dashboard', path: '/' },
+      { name: 'Chat', path: '/chat' },
+      { name: 'Memory', path: '/memory' },
+      { name: 'Swarm', path: '/swarm' },
+      { name: 'Settings', path: '/settings' }
+    ];
+
+    const results = document.getElementById('results');
+
+    async function testPage(page) {
+      const div = document.createElement('div');
+      div.className = 'test pending';
+      div.textContent = `Testing ${page.name}...`;
+      results.appendChild(div);
+
+      try {
+        const response = await fetch(page.path);
+        const html = await response.text();
+        
+        // Check if page has content
+        if (html.includes('<!DOCTYPE html') || html.includes('<html')) {
+          div.className = 'test pass';
+          div.textContent = `✓ ${page.name} - Loaded successfully (${response.status})`;
+        } else {
+          div.className = 'test fail';
+          div.textContent = `✗ ${page.name} - Invalid response`;
+        }
+      } catch (error) {
+        div.className = 'test fail';
+        div.textContent = `✗ ${page.name} - Error: ${error.message}`;
+      }
+    }
+
+    // Test all pages
+    (async () => {
+      for (const page of pages) {
+        await testPage(page);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      const summary = document.createElement('div');
+      summary.style.marginTop = '20px';
+      summary.style.padding = '15px';
+      summary.style.background = 'rgba(124, 58, 237, 0.2)';
+      summary.style.borderRadius = '8px';
+      summary.innerHTML = '<strong>Test Complete!</strong><br>Open each page in a new tab to verify visually.';
+      results.appendChild(summary);
+    })();
+  </script>
+</body>
+</html>

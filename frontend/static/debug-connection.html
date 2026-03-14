@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connection Debug - NullClaw Nexus</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 1000px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #0a0a0f;
+      color: #e0e0e0;
+    }
+    h1 { color: #7c3aed; }
+    button {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:hover { background: #6d28d9; }
+    .success { color: #10b981; }
+    .error { color: #ef4444; }
+    .warning { color: #f59e0b; }
+    pre {
+      background: #1a1a24;
+      padding: 15px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 12px;
+    }
+    .test-result {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔍 Connection Debug</h1>
+  <p>Diagnose gateway connection issues</p>
+
+  <div>
+    <button onclick="runAllTests()">Run All Tests</button>
+    <button onclick="fixUrl()">Fix URL to 3001</button>
+    <button onclick="clearAll()">Clear All Data</button>
+  </div>
+
+  <div id="output"></div>
+
+  <script>
+    function log(message, type = 'info') {
+      const output = document.getElementById('output');
+      const div = document.createElement('div');
+      div.className = `test-result ${type}`;
+      div.innerHTML = message;
+      output.appendChild(div);
+    }
+
+    async function runAllTests() {
+      document.getElementById('output').innerHTML = '';
+      
+      // Test 1: Check localStorage
+      log('<strong>Test 1: localStorage</strong>', 'info');
+      const gatewayConfig = localStorage.getItem('gatewayConfig');
+      if (gatewayConfig) {
+        const config = JSON.parse(gatewayConfig);
+        log(`Current URL: <code>${config.url}</code>`, config.url.includes('3001') ? 'success' : 'warning');
+        log(`<pre>${JSON.stringify(config, null, 2)}</pre>`, 'info');
+      } else {
+        log('No gateway config in localStorage', 'warning');
+      }
+
+      // Test 2: Test CORS proxy
+      log('<strong>Test 2: CORS Proxy (127.0.0.1:3001)</strong>', 'info');
+      try {
+        const response = await fetch('http://127.0.0.1:3001/health', {
+          signal: AbortSignal.timeout(5000)
+        });
+        if (response.ok) {
+          const data = await response.json();
+          log(`✓ CORS Proxy: <code>${JSON.stringify(data)}</code>`, 'success');
+        } else {
+          log(`✗ CORS Proxy returned: ${response.status}`, 'error');
+        }
+      } catch (error) {
+        log(`✗ CORS Proxy error: ${error.message}`, 'error');
+      }
+
+      // Test 3: Test direct gateway (should fail with CORS)
+      log('<strong>Test 3: Direct Gateway (127.0.0.1:3000)</strong>', 'info');
+      try {
+        const response = await fetch('http://127.0.0.1:3000/health', {
+          signal: AbortSignal.timeout(5000)
+        });
+        if (response.ok) {
+          log('⚠ Direct gateway accessible (unexpected)', 'warning');
+        }
+      } catch (error) {
+        log(`✓ Direct gateway blocked (expected): ${error.message}`, 'success');
+      }
+
+      // Test 4: Test with GatewayAPI class
+      log('<strong>Test 4: GatewayAPI Class</strong>', 'info');
+      const testUrl = gatewayConfig ? JSON.parse(gatewayConfig).url : 'http://127.0.0.1:3001';
+      try {
+        const response = await fetch(`${testUrl}/health`, {
+          signal: AbortSignal.timeout(5000)
+        });
+        if (response.ok) {
+          log(`✓ GatewayAPI would connect to: <code>${testUrl}</code>`, 'success');
+        } else {
+          log(`✗ GatewayAPI connection failed: ${response.status}`, 'error');
+        }
+      } catch (error) {
+        log(`✗ GatewayAPI error: ${error.message}`, 'error');
+      }
+
+      // Test 5: Check browser console
+      log('<strong>Test 5: Browser Console</strong>', 'info');
+      log('Open DevTools (F12) and check Console tab for errors', 'warning');
+    }
+
+    function fixUrl() {
+      const config = {
+        url: 'http://127.0.0.1:3001',
+        connected: false,
+        provider: 'ollama',
+        model: 'llama3.1',
+        bearerToken: null,
+        paired: false
+      };
+      localStorage.setItem('gatewayConfig', JSON.stringify(config));
+      log('✓ URL fixed to port 3001', 'success');
+      log('Reload the main app now', 'success');
+    }
+
+    function clearAll() {
+      localStorage.clear();
+      log('✓ All localStorage cleared', 'success');
+      log('Reload the main app now', 'success');
+    }
+
+    // Auto-run on load
+    runAllTests();
+  </script>
+</body>
+</html>

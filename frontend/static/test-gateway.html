@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gateway Connection Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #0a0a0f; color: #fff; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    .success { color: #10b981; }
+    .error { color: #ef4444; }
+    pre { background: #1a1a1f; padding: 10px; border-radius: 5px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>🔧 NullClaw Gateway Connection Test</h1>
+  
+  <div>
+    <label>Gateway URL:</label>
+    <input type="text" id="url" value="http://127.0.0.1:3001" style="width: 300px; padding: 5px;">
+  </div>
+  
+  <div style="margin-top: 20px;">
+    <button onclick="testHealth()">Test /health</button>
+    <button onclick="testPair()">Test /pair (code: 111912)</button>
+    <button onclick="testWebhook()">Test /webhook</button>
+  </div>
+  
+  <div id="output" style="margin-top: 20px;"></div>
+  
+  <script>
+    const output = document.getElementById('output');
+    
+    function log(msg, isError = false) {
+      const div = document.createElement('div');
+      div.className = isError ? 'error' : 'success';
+      div.textContent = msg;
+      output.appendChild(div);
+    }
+    
+    function logJson(obj) {
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(obj, null, 2);
+      output.appendChild(pre);
+    }
+    
+    function clear() {
+      output.innerHTML = '';
+    }
+    
+    async function testHealth() {
+      clear();
+      const url = document.getElementById('url').value;
+      log(`Testing: GET ${url}/health`);
+      
+      try {
+        const response = await fetch(`${url}/health`, {
+          method: 'GET',
+          mode: 'cors'
+        });
+        
+        log(`✅ Status: ${response.status} ${response.statusText}`);
+        
+        const text = await response.text();
+        log(`Response body:`);
+        logJson(JSON.parse(text));
+        
+      } catch (error) {
+        log(`❌ Error: ${error.message}`, true);
+        console.error(error);
+      }
+    }
+    
+    async function testPair() {
+      clear();
+      const url = document.getElementById('url').value;
+      const code = prompt('Enter pairing code:', '111912');
+      if (!code) return;
+      
+      log(`Testing: POST ${url}/pair`);
+      log(`Pairing code: ${code}`);
+      
+      try {
+        const response = await fetch(`${url}/pair`, {
+          method: 'POST',
+          headers: {
+            'X-Pairing-Code': code
+          }
+        });
+        
+        log(`✅ Status: ${response.status} ${response.statusText}`);
+        
+        const text = await response.text();
+        log(`Response body:`);
+        try {
+          logJson(JSON.parse(text));
+        } catch {
+          log(text);
+        }
+        
+      } catch (error) {
+        log(`❌ Error: ${error.message}`, true);
+        console.error(error);
+      }
+    }
+    
+    async function testWebhook() {
+      clear();
+      const url = document.getElementById('url').value;
+      const token = prompt('Enter bearer token (from /pair response):');
+      if (!token) return;
+      
+      log(`Testing: POST ${url}/webhook`);
+      
+      try {
+        const response = await fetch(`${url}/webhook`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ message: 'Hello from test page!' })
+        });
+        
+        log(`✅ Status: ${response.status} ${response.statusText}`);
+        
+        const text = await response.text();
+        log(`Response body:`);
+        try {
+          logJson(JSON.parse(text));
+        } catch {
+          log(text);
+        }
+        
+      } catch (error) {
+        log(`❌ Error: ${error.message}`, true);
+        console.error(error);
+      }
+    }
+  </script>
+</body>
+</html>
