@@ -73,9 +73,8 @@ fn getWslHostIp() ?[15]u8 {
                 const b1 = std.fmt.parseUnsigned(u8, gateway[4..6], 16) catch continue;
                 const b2 = std.fmt.parseUnsigned(u8, gateway[2..4], 16) catch continue;
                 const b3 = std.fmt.parseUnsigned(u8, gateway[0..2], 16) catch continue;
-                var ip_buf: [15]u8 = undefined;
-                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ b0, b1, b2, b3 }) catch continue;
-                _ = ip_str;
+                var ip_buf: [15]u8 = .{0} ** 15;
+                _ = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ b0, b1, b2, b3 }) catch continue;
                 return ip_buf;
             }
         }
@@ -1188,17 +1187,39 @@ pub const Gateway = struct {
             self.active_provider = new_config;
             freeProviderConfig(self.allocator, old_provider);
 
-            // Run auto-discovery for Ollama provider
-            if (std.mem.eql(u8, self.active_provider.provider, "ollama")) {
-                if (discoverOllamaUrl(self.allocator, self.active_provider.base_url)) |discovered| {
-                    // Replace the base_url with discovered URL
-                    const old_url = self.active_provider.base_url;
-                    self.active_provider.base_url = discovered;
-                    self.allocator.free(old_url);
+            std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
+        }
+
+        // Run auto-discovery for Ollama provider OUTSIDE the mutex
+        // to avoid blocking all request handlers during network I/O.
+        {
+            self.provider_mutex.lock();
+            const is_ollama = std.mem.eql(u8, self.active_provider.provider, "ollama");
+            const current_url = if (is_ollama) (self.allocator.dupe(u8, self.active_provider.base_url) catch null) else null;
+            self.provider_mutex.unlock();
+
+            if (is_ollama) {
+                if (current_url) |url| {
+                    defer self.allocator.free(url);
+                    if (discoverOllamaUrl(self.allocator, url)) |discovered| {
+                        self.provider_mutex.lock();
+                        defer self.provider_mutex.unlock();
+                        // Re-check that provider is still ollama and URL hasn't changed
+                        // to avoid overwriting a concurrent config update.
+                        if (std.mem.eql(u8, self.active_provider.provider, "ollama") and
+                            std.mem.eql(u8, self.active_provider.base_url, url))
+                        {
+                            const old_url = self.active_provider.base_url;
+                            self.active_provider.base_url = discovered;
+                            self.allocator.free(old_url);
+                            std.log.info("Auto-discovery updated URL: {s}", .{discovered});
+                        } else {
+                            // Provider changed while we were discovering; discard result
+                            self.allocator.free(discovered);
+                        }
+                    }
                 }
             }
-
-            std.log.info("Provider updated: {s} @ {s}", .{ self.active_provider.provider, self.active_provider.base_url });
         }
 
         try request.respond(
