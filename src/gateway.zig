@@ -1204,10 +1204,19 @@ pub const Gateway = struct {
                     if (discoverOllamaUrl(self.allocator, url)) |discovered| {
                         self.provider_mutex.lock();
                         defer self.provider_mutex.unlock();
-                        const old_url = self.active_provider.base_url;
-                        self.active_provider.base_url = discovered;
-                        self.allocator.free(old_url);
-                        std.log.info("Auto-discovery updated URL: {s}", .{discovered});
+                        // Re-check that provider is still ollama and URL hasn't changed
+                        // to avoid overwriting a concurrent config update.
+                        if (std.mem.eql(u8, self.active_provider.provider, "ollama") and
+                            std.mem.eql(u8, self.active_provider.base_url, url))
+                        {
+                            const old_url = self.active_provider.base_url;
+                            self.active_provider.base_url = discovered;
+                            self.allocator.free(old_url);
+                            std.log.info("Auto-discovery updated URL: {s}", .{discovered});
+                        } else {
+                            // Provider changed while we were discovering; discard result
+                            self.allocator.free(discovered);
+                        }
                     }
                 }
             }
