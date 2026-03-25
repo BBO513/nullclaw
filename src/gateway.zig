@@ -305,6 +305,8 @@ pub const Gateway = struct {
             try self.handleStatus(request);
         } else if (std.mem.eql(u8, target, "/config/provider")) {
             try self.handleConfigProvider(request);
+        } else if (std.mem.eql(u8, target, "/models")) {
+            try self.handleModels(request);
         } else {
             try request.respond(
                 \\{"error":"not_found","message":"Unknown endpoint"}
@@ -1225,6 +1227,233 @@ pub const Gateway = struct {
         try request.respond(
             \\{"status":"ok","message":"Provider configuration updated"}
         , .{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "application/json" },
+                .{ .name = "access-control-allow-origin", .value = "*" },
+            },
+        });
+    }
+
+    /// GET /models — proxy to Ollama's /api/tags and return available model names.
+    /// This allows mobile clients (which can't reach Ollama directly) to discover models
+    /// through the gateway.
+    fn handleModels(self: *Gateway, request: *std.http.Server.Request) !void {
+        if (request.head.method != .GET) {
+            try request.respond(
+                \\{"error":"method_not_allowed","message":"GET required"}
+            , .{
+                .status = .method_not_allowed,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        }
+
+        // Get the current Ollama base URL from the active provider
+        const ollama_base_url = blk: {
+            self.provider_mutex.lock();
+            defer self.provider_mutex.unlock();
+            break :blk self.allocator.dupe(u8, self.active_provider.base_url) catch {
+                try request.respond(
+                    \\{"models":[]}
+                , .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "access-control-allow-origin", .value = "*" },
+                    },
+                });
+                return;
+            };
+        };
+        defer self.allocator.free(ollama_base_url);
+
+        // Build the Ollama /api/tags URL
+        var url_buf: [512]u8 = undefined;
+        const tags_url = std.fmt.bufPrint(&url_buf, "{s}/api/tags", .{ollama_base_url}) catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        // Make HTTP request to Ollama
+        const uri = std.Uri.parse(tags_url) catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        var client: std.http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        var server_header_buf: [4096]u8 = undefined;
+        var req = client.open(.GET, uri, .{
+            .server_header_buffer = &server_header_buf,
+        }) catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+        defer req.deinit();
+
+        req.send() catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+        req.finish() catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+        req.wait() catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        if (req.response.status != .ok) {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        }
+
+        // Read the Ollama response body
+        var body_buf: [32768]u8 = undefined;
+        const body_len = req.reader().readAll(&body_buf) catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+        const body = body_buf[0..body_len];
+
+        // Parse the Ollama response and extract model names
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+        defer parsed.deinit();
+
+        // Build a JSON array of model name strings
+        var response_buf: [8192]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&response_buf);
+        const writer = fbs.writer();
+        writer.writeAll("{\"models\":[") catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("models")) |models_val| {
+                if (models_val == .array) {
+                    var first = true;
+                    for (models_val.array.items) |model| {
+                        if (model == .object) {
+                            if (model.object.get("name")) |name_val| {
+                                if (name_val == .string) {
+                                    if (!first) writer.writeAll(",") catch break;
+                                    writer.writeAll("\"") catch break;
+                                    writer.writeAll(name_val.string) catch break;
+                                    writer.writeAll("\"") catch break;
+                                    first = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        writer.writeAll("]}") catch {
+            try request.respond(
+                \\{"models":[]}
+            , .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/json" },
+                    .{ .name = "access-control-allow-origin", .value = "*" },
+                },
+            });
+            return;
+        };
+
+        const response = fbs.getWritten();
+        try request.respond(response, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
